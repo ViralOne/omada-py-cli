@@ -1,0 +1,5 @@
+omada_token.json
+.vscode/*
+logs/
+*.log
+.env
