@@ -346,21 +346,31 @@ class OmadaVPNManager:
         
         # Create payload with all required fields
         payload = {
+            "id": vpn_client.get("id", ""),
             "name": vpn_client.get("name", ""),
             "status": new_status,
             "mode": vpn_client.get("mode", 0),
+            "remoteSite": vpn_client.get("remoteSite", ""),
             "remoteIp": vpn_client.get("remoteIp", ""),
+            "remoteSubnet": vpn_client.get("remoteSubnet", []),
+            "networkType": vpn_client.get("networkType", 0),
             "networkList": vpn_client.get("networkList", []),
             "customNetwork": vpn_client.get("customNetwork", []),
             "preSharedKey": vpn_client.get("preSharedKey", ""),
             "wan": vpn_client.get("wan", []),
             "clientVpnType": vpn_client.get("clientVpnType", 0),
             "openVpnTunnelMode": vpn_client.get("openVpnTunnelMode", 0),
+            "openVpnMode": vpn_client.get("openVpnMode", 0),
             "serviceType": vpn_client.get("serviceType", 0),
             "servicePort": vpn_client.get("servicePort", 0),
             "encryption": vpn_client.get("encryption", 0),
+            "workingMode": vpn_client.get("workingMode", 0),
             "vpnConfiguration": vpn_client.get("vpnConfiguration", {"id": "", "fileName": ""})
         }
+        
+        # Debug logging to see what's in the payload
+        # self.logger.info(f"VPN client data: {json.dumps(vpn_client, indent=2)}")
+        # self.logger.info(f"Payload being sent: {json.dumps(payload, indent=2)}")
         
         headers = {
             "Content-Type": "application/json",
