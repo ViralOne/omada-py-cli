@@ -30,6 +30,7 @@ class VPNAction(Enum):
     ENABLE = "enable"
     DISABLE = "disable" 
     RESTART = "restart"
+    TOKEN_ONLY = "token_only"
 
 
 @dataclass
@@ -76,6 +77,10 @@ class OmadaConfig:
         except ValueError:
             valid_actions = [action.value for action in VPNAction]
             raise ValueError(f"Invalid VPN action '{vpn_action_str}'. Must be one of: {valid_actions}")
+        
+        # For token_only mode, vpn_name is not required
+        if vpn_action == VPNAction.TOKEN_ONLY and not required_vars['vpn_name']:
+            required_vars['vpn_name'] = "not_required_for_token_only"
         
         return cls(
             **required_vars,
@@ -488,6 +493,12 @@ def main() -> int:
         
         # Authenticate
         manager.authenticate()
+        
+        # Handle token-only mode
+        if config.vpn_action == VPNAction.TOKEN_ONLY:
+            manager.logger.info("✅ Token generated successfully and saved to omada_token.json")
+            manager.logger.info("Exiting as requested (token_only mode)")
+            return 0
         
         # Execute VPN action
         success = manager.execute_vpn_action(config.vpn_name, config.vpn_action)

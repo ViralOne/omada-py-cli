@@ -66,3 +66,4 @@ The script will:
 - **enable**: Activates the VPN client
 - **disable**: Deactivates the VPN client  
 - **restart**: Disables the VPN client, waits 5 seconds, then enables it (useful for reconnecting)
+- **token_only**: Generates a new token and exists the script
