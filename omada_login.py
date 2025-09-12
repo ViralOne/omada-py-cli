@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Omada VPN Client Manager - Optimized Version
+Omada VPN Client Manager
 
 A Python script for managing TP-Link Omada VPN clients via the OpenAPI.
 Supports enable, disable, and restart operations with improved error handling,
 logging, and configuration management.
 """
 
+import argparse
 import json
 import logging
 import os
@@ -49,11 +50,11 @@ class OmadaConfig:
     retry_attempts: int = 3
     
     @classmethod
-    def from_env(cls) -> 'OmadaConfig':
-        """Create configuration from environment variables"""
+    def from_env_and_args(cls, args: Optional[argparse.Namespace] = None) -> 'OmadaConfig':
+        """Create configuration from environment variables and CLI arguments"""
         load_dotenv()
         
-        # Get required variables
+        # Get required variables from environment
         required_vars = {
             'base_url': os.getenv('OMADA_URL'),
             'client_id': os.getenv('OMADA_CLIENT_ID'), 
@@ -63,17 +64,23 @@ class OmadaConfig:
             'password': os.getenv('OMADA_PASSWORD')
         }
         
-        # Handle VPN names (can be comma-separated)
-        vpn_names_str = os.getenv('OMADA_VPN_NAME', '')
-        vpn_names = [name.strip() for name in vpn_names_str.split(',') if name.strip()]
+        # Handle VPN names - CLI args override environment
+        if args and args.vpn:
+            vpn_names = [name.strip() for name in args.vpn if name.strip()]
+        else:
+            vpn_names_str = os.getenv('OMADA_VPN_NAME', '')
+            vpn_names = [name.strip() for name in vpn_names_str.split(',') if name.strip()]
+        
+        # Handle action - CLI args override environment
+        if args and args.action:
+            vpn_action_str = args.action.lower()
+        else:
+            vpn_action_str = os.getenv('OMADA_VPN_ACTION', 'disable').lower()
         
         # Check for missing variables
         missing = [key for key, value in required_vars.items() if not value]
         if missing:
             raise ValueError(f"Missing required environment variables: {', '.join(missing.upper())}")
-        
-        # Get optional variables
-        vpn_action_str = os.getenv('OMADA_VPN_ACTION', 'disable').lower()
         
         try:
             vpn_action = VPNAction(vpn_action_str)
@@ -85,7 +92,7 @@ class OmadaConfig:
         if vpn_action == VPNAction.TOKEN_ONLY and not vpn_names:
             vpn_names = ["not_required_for_token_only"]
         elif vpn_action != VPNAction.TOKEN_ONLY and not vpn_names:
-            raise ValueError("Missing required environment variable: OMADA_VPN_NAME")
+            raise ValueError("Missing VPN name(s). Use --vpn argument or set OMADA_VPN_NAME environment variable")
         
         return cls(
             **required_vars,
@@ -95,6 +102,11 @@ class OmadaConfig:
             timeout=int(os.getenv('OMADA_TIMEOUT', '30')),
             retry_attempts=int(os.getenv('OMADA_RETRY_ATTEMPTS', '3'))
         )
+    
+    @classmethod
+    def from_env(cls) -> 'OmadaConfig':
+        """Create configuration from environment variables (backward compatibility)"""
+        return cls.from_env_and_args()
 
 
 class OmadaAPIError(Exception):
@@ -512,11 +524,60 @@ class OmadaVPNManager:
             return {name: False for name in vpn_names}
 
 
+def parse_arguments() -> argparse.Namespace:
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description="Omada VPN Client Manager - Control TP-Link Omada VPN clients",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --vpn MyVPN --action enable           # Enable a single VPN
+  %(prog)s --vpn MyVPN1 MyVPN2 --action disable # Disable multiple VPNs
+  %(prog)s --vpn MyVPN --action restart         # Restart a VPN
+  %(prog)s --action token_only                  # Generate token only
+  %(prog)s                                      # Use environment variables
+
+Environment Variables:
+  OMADA_URL, OMADA_CLIENT_ID, OMADA_CLIENT_SECRET, OMADA_OMADAC_ID,
+  OMADA_USERNAME, OMADA_PASSWORD, OMADA_VPN_NAME, OMADA_VPN_ACTION
+        """
+    )
+    
+    parser.add_argument(
+        '--vpn', '-v',
+        nargs='+',
+        help='VPN client name(s) to manage. Can specify multiple names.'
+    )
+    
+    parser.add_argument(
+        '--action', '-a',
+        choices=['enable', 'disable', 'restart', 'token_only'],
+        help='Action to perform on the VPN client(s)'
+    )
+    
+    parser.add_argument(
+        '--version',
+        action='version',
+        version='Omada VPN Manager 1.0.0'
+    )
+    
+    args = parser.parse_args()
+    
+    # Validate that --action is required when --vpn is used
+    if args.vpn and not args.action:
+        parser.error("--action/-a is required when --vpn/-v is specified")
+    
+    return args
+
+
 def main() -> int:
     """Main function"""
     try:
-        # Load configuration
-        config = OmadaConfig.from_env()
+        # Parse command line arguments
+        args = parse_arguments()
+        
+        # Load configuration from environment and CLI args
+        config = OmadaConfig.from_env_and_args(args)
         
         # Create manager instance
         manager = OmadaVPNManager(config)
