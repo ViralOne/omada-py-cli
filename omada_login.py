@@ -42,7 +42,7 @@ class OmadaConfig:
     omadac_id: str
     username: str
     password: str
-    vpn_name: str
+    vpn_names: List[str]
     vpn_action: VPNAction = VPNAction.DISABLE
     verify_ssl: bool = False
     timeout: int = 30
@@ -60,9 +60,12 @@ class OmadaConfig:
             'client_secret': os.getenv('OMADA_CLIENT_SECRET'),
             'omadac_id': os.getenv('OMADA_OMADAC_ID'),
             'username': os.getenv('OMADA_USERNAME'),
-            'password': os.getenv('OMADA_PASSWORD'),
-            'vpn_name': os.getenv('OMADA_VPN_NAME')
+            'password': os.getenv('OMADA_PASSWORD')
         }
+        
+        # Handle VPN names (can be comma-separated)
+        vpn_names_str = os.getenv('OMADA_VPN_NAME', '')
+        vpn_names = [name.strip() for name in vpn_names_str.split(',') if name.strip()]
         
         # Check for missing variables
         missing = [key for key, value in required_vars.items() if not value]
@@ -78,12 +81,15 @@ class OmadaConfig:
             valid_actions = [action.value for action in VPNAction]
             raise ValueError(f"Invalid VPN action '{vpn_action_str}'. Must be one of: {valid_actions}")
         
-        # For token_only mode, vpn_name is not required
-        if vpn_action == VPNAction.TOKEN_ONLY and not required_vars['vpn_name']:
-            required_vars['vpn_name'] = "not_required_for_token_only"
+        # For token_only mode, vpn_names is not required
+        if vpn_action == VPNAction.TOKEN_ONLY and not vpn_names:
+            vpn_names = ["not_required_for_token_only"]
+        elif vpn_action != VPNAction.TOKEN_ONLY and not vpn_names:
+            raise ValueError("Missing required environment variable: OMADA_VPN_NAME")
         
         return cls(
             **required_vars,
+            vpn_names=vpn_names,
             vpn_action=vpn_action,
             verify_ssl=os.getenv('OMADA_VERIFY_SSL', 'false').lower() == 'true',
             timeout=int(os.getenv('OMADA_TIMEOUT', '30')),
@@ -287,17 +293,30 @@ class OmadaVPNManager:
         except Exception as e:
             self.logger.warning(f"Could not save token info: {str(e)}")
     
-    def get_sites(self, page: int = 1, page_size: int = 10) -> List[Dict]:
-        """Get list of sites from Omada controller"""
+    def _get_auth_headers(self) -> Dict[str, str]:
+        """Get authentication headers for API requests"""
         if not self.access_token:
             raise OmadaAPIError("Not authenticated. Call authenticate() first.")
         
-        url = f"{self.config.base_url}/openapi/v1/{self.config.omadac_id}/sites"
-        params = {"page": page, "pageSize": page_size}
-        headers = {
+        return {
             "Content-Type": "application/json",
             "Authorization": f"AccessToken={self.access_token}"
         }
+    
+    def _get_primary_site(self) -> tuple[str, str]:
+        """Get the primary site ID and name"""
+        sites = self.get_sites()
+        if not sites:
+            raise OmadaAPIError("No sites found")
+        
+        site = sites[0]
+        return site["siteId"], site.get("name", "Unknown")
+    
+    def get_sites(self, page: int = 1, page_size: int = 10) -> List[Dict]:
+        """Get list of sites from Omada controller"""
+        url = f"{self.config.base_url}/openapi/v1/{self.config.omadac_id}/sites"
+        params = {"page": page, "pageSize": page_size}
+        headers = self._get_auth_headers()
         
         response = self._make_request("GET", url, params=params, headers=headers)
         result = self._handle_api_response(response, "sites")
@@ -306,14 +325,8 @@ class OmadaVPNManager:
     
     def get_vpn_clients(self, site_id: str) -> List[Dict]:
         """Get VPN clients for a specific site"""
-        if not self.access_token:
-            raise OmadaAPIError("Not authenticated. Call authenticate() first.")
-        
         url = f"{self.config.base_url}/openapi/v1/{self.config.omadac_id}/sites/{site_id}/vpn/client-to-site-vpn-clients"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"AccessToken={self.access_token}"
-        }
+        headers = self._get_auth_headers()
         
         response = self._make_request("GET", url, headers=headers)
         result = self._handle_api_response(response, "VPN clients")
@@ -343,9 +356,6 @@ class OmadaVPNManager:
     
     def update_vpn_client_status(self, site_id: str, vpn_client: Dict, new_status: bool) -> bool:
         """Update VPN client status"""
-        if not self.access_token:
-            raise OmadaAPIError("Not authenticated. Call authenticate() first.")
-        
         vpn_id = vpn_client.get("id")
         url = f"{self.config.base_url}/openapi/v1/{self.config.omadac_id}/sites/{site_id}/vpn/client-to-site-vpn-clients/{vpn_id}"
         
@@ -373,14 +383,7 @@ class OmadaVPNManager:
             "vpnConfiguration": vpn_client.get("vpnConfiguration", {"id": "", "fileName": ""})
         }
         
-        # Debug logging to see what's in the payload
-        # self.logger.info(f"VPN client data: {json.dumps(vpn_client, indent=2)}")
-        # self.logger.info(f"Payload being sent: {json.dumps(payload, indent=2)}")
-        
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"AccessToken={self.access_token}"
-        }
+        headers = self._get_auth_headers()
         
         try:
             response = self._make_request("PATCH", url, headers=headers, json=payload)
@@ -447,35 +450,66 @@ class OmadaVPNManager:
             self.logger.error(f"Error during VPN client restart: {str(e)}")
             return False
     
+    def _execute_single_vpn_action(self, site_id: str, vpn_name: str, action: VPNAction) -> bool:
+        """Execute a single VPN action (helper method to reduce duplication)"""
+        if action == VPNAction.RESTART:
+            return self.restart_vpn_client(site_id, vpn_name)
+        else:
+            # Find VPN client
+            vpn_client = self.find_vpn_client(site_id, vpn_name)
+            if not vpn_client:
+                self.logger.error(f"VPN client '{vpn_name}' not found")
+                return False
+            
+            new_status = action == VPNAction.ENABLE
+            return self.update_vpn_client_status(site_id, vpn_client, new_status)
+
     def execute_vpn_action(self, vpn_name: str, action: VPNAction) -> bool:
         """Execute the specified VPN action"""
         try:
-            # Get sites and use the first one
-            sites = self.get_sites()
-            if not sites:
-                self.logger.error("No sites found")
-                return False
-            
-            site = sites[0]
-            site_id = site["siteId"]
-            site_name = site.get("name", "Unknown")
+            site_id, site_name = self._get_primary_site()
             self.logger.info(f"Using site: {site_name}")
             
-            if action == VPNAction.RESTART:
-                return self.restart_vpn_client(site_id, vpn_name)
-            else:
-                # Find VPN client
-                vpn_client = self.find_vpn_client(site_id, vpn_name)
-                if not vpn_client:
-                    self.logger.error(f"VPN client '{vpn_name}' not found")
-                    return False
-                
-                new_status = action == VPNAction.ENABLE
-                return self.update_vpn_client_status(site_id, vpn_client, new_status)
+            return self._execute_single_vpn_action(site_id, vpn_name, action)
                 
         except Exception as e:
             self.logger.error(f"Error executing VPN action: {str(e)}")
             return False
+
+    def execute_vpn_actions_for_multiple(self, vpn_names: List[str], action: VPNAction) -> Dict[str, bool]:
+        """Execute the specified VPN action for multiple VPN clients"""
+        results = {}
+        
+        try:
+            site_id, site_name = self._get_primary_site()
+            self.logger.info(f"Using site: {site_name}")
+            
+            # Process each VPN client
+            for i, vpn_name in enumerate(vpn_names, 1):
+                self.logger.info(f"\n[{i}/{len(vpn_names)}] Processing VPN client: {vpn_name}")
+                
+                try:
+                    success = self._execute_single_vpn_action(site_id, vpn_name, action)
+                    results[vpn_name] = success
+                    
+                    if success:
+                        self.logger.info(f"✅ Successfully {action.value}d '{vpn_name}'")
+                    else:
+                        self.logger.error(f"❌ Failed to {action.value} '{vpn_name}'")
+                        
+                except Exception as e:
+                    self.logger.error(f"Error processing '{vpn_name}': {str(e)}")
+                    results[vpn_name] = False
+                
+                # Add a small delay between operations to avoid overwhelming the API
+                if i < len(vpn_names):
+                    time.sleep(1)
+            
+            return results
+                
+        except Exception as e:
+            self.logger.error(f"Error executing VPN actions: {str(e)}")
+            return {name: False for name in vpn_names}
 
 
 def main() -> int:
@@ -489,7 +523,10 @@ def main() -> int:
         
         # Log configuration (without sensitive data)
         manager.logger.info(f"Connecting to Omada Controller at {config.base_url}")
-        manager.logger.info(f"Target VPN: {config.vpn_name} (Action: {config.vpn_action.value})")
+        if len(config.vpn_names) == 1:
+            manager.logger.info(f"Target VPN: {config.vpn_names[0]} (Action: {config.vpn_action.value})")
+        else:
+            manager.logger.info(f"Target VPNs: {', '.join(config.vpn_names)} (Action: {config.vpn_action.value})")
         
         # Authenticate
         manager.authenticate()
@@ -500,15 +537,36 @@ def main() -> int:
             manager.logger.info("Exiting as requested (token_only mode)")
             return 0
         
-        # Execute VPN action
-        success = manager.execute_vpn_action(config.vpn_name, config.vpn_action)
-        
-        if success:
-            manager.logger.info(f"✅ Successfully {config.vpn_action.value}d VPN client '{config.vpn_name}'")
-            return 0
+        # Execute VPN actions
+        if len(config.vpn_names) == 1:
+            # Single VPN - use original method for backward compatibility
+            success = manager.execute_vpn_action(config.vpn_names[0], config.vpn_action)
+            
+            if success:
+                manager.logger.info(f"✅ Successfully {config.vpn_action.value}d VPN client '{config.vpn_names[0]}'")
+                return 0
+            else:
+                manager.logger.error(f"❌ Failed to {config.vpn_action.value} VPN client '{config.vpn_names[0]}'")
+                return 1
         else:
-            manager.logger.error(f"❌ Failed to {config.vpn_action.value} VPN client '{config.vpn_name}'")
-            return 1
+            # Multiple VPNs
+            manager.logger.info(f"\n🚀 Starting batch operation for {len(config.vpn_names)} VPN clients...")
+            results = manager.execute_vpn_actions_for_multiple(config.vpn_names, config.vpn_action)
+            
+            # Summary
+            successful = [name for name, success in results.items() if success]
+            failed = [name for name, success in results.items() if not success]
+            
+            manager.logger.info(f"\n📊 Batch operation summary:")
+            manager.logger.info(f"✅ Successful: {len(successful)}/{len(config.vpn_names)}")
+            if successful:
+                manager.logger.info(f"   - {', '.join(successful)}")
+            
+            if failed:
+                manager.logger.info(f"❌ Failed: {len(failed)}/{len(config.vpn_names)}")
+                manager.logger.info(f"   - {', '.join(failed)}")
+            
+            return 0 if len(failed) == 0 else 1
             
     except Exception as e:
         logging.error(f"Application error: {str(e)}")
