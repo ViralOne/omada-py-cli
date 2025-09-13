@@ -163,6 +163,8 @@ class OmadaController:
                 response = self.session.get(url, params=params, headers=headers)
             elif method.upper() == "POST":
                 response = self.session.post(url, params=params, json=data, headers=headers)
+            elif method.upper() == "PUT":
+                response = self.session.put(url, params=params, json=data, headers=headers)
             elif method.upper() == "PATCH":
                 response = self.session.patch(url, params=params, json=data, headers=headers)
             elif method.upper() == "DELETE":
@@ -564,6 +566,132 @@ class OmadaController:
                 return vpn.get('status', False)  # Use 'status' instead of 'enable'
         return None
 
+    # WireGuard Methods
+    def get_wireguard_peers(self, site_key=None, page=1, page_size=10) -> List[Dict]:
+        """Get WireGuard peers list"""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+            
+        params = {
+            "currentPage": page,
+            "currentPageSize": page_size
+        }
+        
+        result = self.make_api_call(f"sites/{site_key}/setting/wireguard/peer", params=params)
+        return result['result']['data'] if result and 'result' in result else []
+    
+    def get_wireguard_servers(self, site_key=None, page=1, page_size=10) -> List[Dict]:
+        """Get WireGuard servers list"""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+            
+        params = {
+            "currentPage": page,
+            "currentPageSize": page_size
+        }
+        
+        result = self.make_api_call(f"sites/{site_key}/setting/wireguard", params=params)
+        return result['result']['data'] if result and 'result' in result else []
+    
+    def get_wireguard_insights(self, site_key=None, page=1, page_size=10, server_filter=0) -> List[Dict]:
+        """Get WireGuard connection insights
+        
+        Args:
+            site_key: Site key (uses current site if None)
+            page: Page number for pagination
+            page_size: Number of items per page
+            server_filter: Server filter (0 for all, specific server ID for filtering)
+        """
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+            
+        params = {
+            "currentPage": page,
+            "currentPageSize": page_size,
+            "filters.server": server_filter
+        }
+        
+        result = self.make_api_call(f"sites/{site_key}/insight/wireguard", params=params)
+        return result['result']['data'] if result and 'result' in result else []
+    
+    def create_wireguard_peer(self, peer_config: Dict, site_key=None) -> bool:
+        """Create a new WireGuard peer
+        
+        Args:
+            peer_config: Dictionary containing peer configuration
+            site_key: Site key (uses current site if None)
+        """
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return False
+            
+        result = self.make_api_call(f"sites/{site_key}/setting/wireguard/peer", 
+                                  method="POST", data=peer_config)
+        return result is not None
+    
+    def update_wireguard_peer(self, peer_id: str, peer_config: Dict, site_key=None) -> bool:
+        """Update an existing WireGuard peer
+        
+        Args:
+            peer_id: ID of the peer to update
+            peer_config: Dictionary containing updated peer configuration
+            site_key: Site key (uses current site if None)
+        """
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return False
+        
+        self.logger.debug(f"Updating WireGuard peer {peer_id} with config: {peer_config}")
+        
+        # Use PUT method with the peer ID in the URL as shown in your example
+        result = self.make_api_call(f"sites/{site_key}/setting/wireguard/peer/{peer_id}", 
+                                  method="PUT", data=peer_config)
+        return result is not None
+    
+    def delete_wireguard_peer(self, peer_id: str, site_key=None) -> bool:
+        """Delete a WireGuard peer
+        
+        Args:
+            peer_id: ID of the peer to delete
+            site_key: Site key (uses current site if None)
+        """
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return False
+            
+        result = self.make_api_call(f"sites/{site_key}/setting/wireguard/peer/{peer_id}", 
+                                  method="DELETE")
+        return result is not None
+    
+    def get_wireguard_peer_by_name(self, peer_name: str, site_key=None) -> Optional[Dict]:
+        """Find a WireGuard peer by name"""
+        peers = self.get_wireguard_peers(site_key)
+        for peer in peers:
+            if peer.get('name', '').lower() == peer_name.lower():
+                return peer
+        return None
+    
+    def toggle_wireguard_peer(self, peer_name: str, enabled: bool, site_key=None) -> bool:
+        """Enable or disable a WireGuard peer by name
+        
+        Args:
+            peer_name: Name of the peer to toggle
+            enabled: True to enable, False to disable
+            site_key: Site key (uses current site if None)
+        """
+        peer = self.get_wireguard_peer_by_name(peer_name, site_key)
+        if not peer:
+            self.logger.error(f"WireGuard peer '{peer_name}' not found")
+            return False
+        
+        updated_config = peer.copy()
+        updated_config['status'] = enabled  # Use 'status' instead of 'enable'
+        
+        return self.update_wireguard_peer(peer['id'], updated_config, site_key)
+
 def create_controller(base_url: str, username: str, password: str, debug: bool = False) -> OmadaController:
     """Factory function to create and connect to Omada Controller"""
     controller = OmadaController(base_url, username, password, debug)
@@ -762,6 +890,323 @@ def cmd_find_device(controller, args):
             logger.info(f"  {i}. {device['name']} {status_icon}")
             logger.info(f"     MAC: {device['mac']} | Model: {device['model']}")
             logger.info(f"     Match: {device['_match_reason']} (score: {device['_match_score']})")
+
+def cmd_find_client(controller, args):
+    """Find clients using advanced search"""
+    logger = logging.getLogger('omada_api')
+    search_type = getattr(args, 'search_type', 'fuzzy')
+    limit = getattr(args, 'limit', 10)
+    
+    # Try exact match first
+    if search_type == 'fuzzy':
+        exact_client = controller.find_client_by_name(args.name, args.site, args.active_only)
+        if exact_client:
+            logger.info(f"🎯 Exact match found:")
+            logger.info(f"  Name: {exact_client.get('name', 'Unknown')}")
+            logger.info(f"  MAC: {exact_client.get('mac', 'Unknown')}")
+            logger.info(f"  IP: {exact_client.get('ip', 'No IP')}")
+            return
+    
+    # Use advanced search
+    results = controller.search_clients(args.name, args.site, args.active_only, search_type, limit)
+    
+    if not results:
+        logger.info(f"No clients found matching '{args.name}' using {search_type} search")
+        if search_type != 'fuzzy':
+            logger.info("💡 Try using fuzzy search: --search-type fuzzy")
+        return
+    
+    if len(results) == 1:
+        client = results[0]
+        logger.info(f"🎯 Client found ({client['_match_reason']}):")
+        logger.info(f"  Name: {client.get('name', 'Unknown')}")
+        logger.info(f"  MAC: {client.get('mac', 'Unknown')}")
+        logger.info(f"  IP: {client.get('ip', 'No IP')}")
+    else:
+        logger.info(f"🔍 Found {len(results)} clients matching '{args.name}':")
+        for i, client in enumerate(results, 1):
+            logger.info(f"  {i}. {client.get('name', 'Unknown')}")
+            logger.info(f"     MAC: {client.get('mac', 'Unknown')} | IP: {client.get('ip', 'No IP')}")
+            logger.info(f"     Match: {client['_match_reason']} (score: {client['_match_score']})")
+
+def cmd_wireguard_peers(controller, args):
+    """List WireGuard peers"""
+    logger = logging.getLogger('omada_vpn')
+    peers = controller.get_wireguard_peers(args.site, getattr(args, 'page', 1), getattr(args, 'page_size', 10))
+    if not peers:
+        logger.info("No WireGuard peers found")
+        return
+    
+    logger.info(f"WireGuard Peers ({len(peers)} total):")
+    
+    # Show raw data if requested
+    if getattr(args, 'raw', False):
+        logger.info("Raw API Response:")
+        for i, peer in enumerate(peers, 1):
+            logger.info(f"  Peer {i}: {peer}")
+        return
+    
+    for peer in peers:
+        # Use the actual field names from the API response
+        enabled = peer.get('status', False)
+        status = "✓ Enabled" if enabled else "✗ Disabled"
+        
+        logger.info(f"  - {peer.get('name', 'Unknown')} - {status}")
+        logger.info(f"    Interface: {peer.get('interfaceName', 'Unknown')}")
+        logger.info(f"    Public Key: {peer.get('publicKey', 'N/A')[:20]}...")
+        
+        # Show allowed addresses (this is the correct field name)
+        allowed_addresses = peer.get('allowAddress', [])
+        if allowed_addresses:
+            logger.info(f"    Allowed IPs: {', '.join(allowed_addresses)}")
+        else:
+            logger.info(f"    Allowed IPs: N/A")
+        
+        # Show keep alive setting
+        keep_alive = peer.get('keepAlive')
+        if keep_alive:
+            logger.info(f"    Keep Alive: {keep_alive}s")
+        
+        logger.info("")  # Empty line between peers
+
+def cmd_wireguard_servers(controller, args):
+    """List WireGuard servers"""
+    logger = logging.getLogger('omada_vpn')
+    servers = controller.get_wireguard_servers(args.site, getattr(args, 'page', 1), getattr(args, 'page_size', 10))
+    if not servers:
+        logger.info("No WireGuard servers found")
+        return
+    
+    logger.info(f"WireGuard Servers ({len(servers)} total):")
+    
+    # Show raw data if requested
+    if getattr(args, 'raw', False):
+        logger.info("Raw API Response:")
+        for i, server in enumerate(servers, 1):
+            logger.info(f"  Server {i}: {server}")
+        return
+    
+    for server in servers:
+        # Use the actual field names from the API response
+        enabled = server.get('status', False)
+        status = "✓ Enabled" if enabled else "✗ Disabled"
+        
+        logger.info(f"  - {server.get('name', 'Unknown')} - {status}")
+        
+        # Show server details using actual field names
+        listen_port = server.get('listenPort')
+        if listen_port:
+            logger.info(f"    Listen Port: {listen_port}")
+        
+        public_key = server.get('publicKey')
+        if public_key:
+            logger.info(f"    Public Key: {public_key[:20]}...")
+        
+        # Show local IP (external endpoint)
+        local_ip = server.get('localIp')
+        if local_ip:
+            logger.info(f"    External IP: {local_ip}")
+        
+        # Show MTU
+        mtu = server.get('mtu')
+        if mtu:
+            logger.info(f"    MTU: {mtu}")
+        
+        logger.info("")  # Empty line between servers
+
+def cmd_wireguard_insights(controller, args):
+    """Show WireGuard connection insights"""
+    logger = logging.getLogger('omada_vpn')
+    server_filter = getattr(args, 'server_filter', 0)
+    insights = controller.get_wireguard_insights(args.site, getattr(args, 'page', 1), 
+                                               getattr(args, 'page_size', 10), server_filter)
+    if not insights:
+        logger.info("No WireGuard connection insights available")
+        return
+    
+    logger.info(f"WireGuard Connection Insights ({len(insights)} total):")
+    
+    # Show raw data if requested
+    if getattr(args, 'raw', False):
+        logger.info("Raw API Response:")
+        for i, insight in enumerate(insights, 1):
+            logger.info(f"  Connection {i}: {insight}")
+        return
+    
+    for i, insight in enumerate(insights, 1):
+        logger.info(f"  Connection {i}:")
+        
+        # Show all available fields for debugging
+        if controller.debug:
+            logger.debug(f"    Raw data: {insight}")
+        
+        # Use the actual field names from the API response
+        peer_name = insight.get('name', 'Unknown')
+        server_name = insight.get('interfaceName', 'Unknown')
+        remote_ip = insight.get('remoteIp', 'N/A')
+        remote_port = insight.get('remotePort', 'N/A')
+        
+        logger.info(f"    Peer: {peer_name}")
+        logger.info(f"    Server: {server_name}")
+        logger.info(f"    Remote Endpoint: {remote_ip}:{remote_port}")
+        
+        # Handle timestamp fields
+        handshake = insight.get('lastHandshake', 'N/A')
+        logger.info(f"    Last Handshake: {handshake}")
+        
+        # Handle transfer data with proper formatting
+        down_bytes = insight.get('downBytes', 0)
+        up_bytes = insight.get('upBytes', 0)
+        
+        def format_bytes(bytes_val):
+            """Format bytes in human readable format"""
+            if bytes_val == 0:
+                return "0 B"
+            
+            for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                if bytes_val < 1024.0:
+                    return f"{bytes_val:.1f} {unit}"
+                bytes_val /= 1024.0
+            return f"{bytes_val:.1f} PB"
+        
+        logger.info(f"    Transfer - Down: {format_bytes(down_bytes)}, Up: {format_bytes(up_bytes)}")
+        
+        logger.info("")  # Empty line between connections
+
+def cmd_wireguard_peer_enable(controller, args):
+    """Enable a WireGuard peer"""
+    logger = logging.getLogger('omada_vpn')
+    if controller.toggle_wireguard_peer(args.name, True, args.site):
+        logger.info(f"WireGuard peer '{args.name}' enabled successfully")
+    else:
+        logger.error(f"Failed to enable WireGuard peer '{args.name}'")
+
+def cmd_wireguard_peer_disable(controller, args):
+    """Disable a WireGuard peer"""
+    logger = logging.getLogger('omada_vpn')
+    if controller.toggle_wireguard_peer(args.name, False, args.site):
+        logger.info(f"WireGuard peer '{args.name}' disabled successfully")
+    else:
+        logger.error(f"Failed to disable WireGuard peer '{args.name}'")
+
+def cmd_wireguard_peer_status(controller, args):
+    """Check WireGuard peer status"""
+    logger = logging.getLogger('omada_vpn')
+    peer = controller.get_wireguard_peer_by_name(args.name, args.site)
+    if not peer:
+        logger.warning(f"WireGuard peer '{args.name}' not found")
+    else:
+        status = "enabled" if peer.get('enable', False) else "disabled"
+        logger.info(f"WireGuard peer '{args.name}' is {status}")
+        logger.info(f"  Public Key: {peer.get('publicKey', 'N/A')}")
+        logger.info(f"  Allowed IPs: {peer.get('allowedIps', 'N/A')}")
+        if peer.get('endpoint'):
+            logger.info(f"  Endpoint: {peer.get('endpoint')}")
+
+def cmd_wireguard_peer_restart(controller, args):
+    """Restart a WireGuard peer (disable, wait 2 seconds, enable)"""
+    import time
+    
+    logger = logging.getLogger('omada_vpn')
+    logger.info(f"Restarting WireGuard peer '{args.name}'...")
+    
+    # First, disable the peer
+    if not controller.toggle_wireguard_peer(args.name, False, args.site):
+        logger.error(f"Failed to disable WireGuard peer '{args.name}'")
+        return
+    
+    # Wait 2 seconds
+    time.sleep(2)
+    
+    # Enable the peer
+    if controller.toggle_wireguard_peer(args.name, True, args.site):
+        logger.info(f"WireGuard peer '{args.name}' restarted successfully")
+    else:
+        logger.error(f"Failed to enable WireGuard peer '{args.name}' after restart")
+
+def cmd_wireguard_peer_list(controller, args):
+    """List WireGuard peers with filtering options"""
+    logger = logging.getLogger('omada_vpn')
+    peers = controller.get_wireguard_peers(args.site)
+    if not peers:
+        logger.info("No WireGuard peers found")
+        return
+    
+    # Apply filters
+    filtered_peers = peers
+    if getattr(args, 'enabled_only', False):
+        filtered_peers = [p for p in peers if p.get('status', False)]
+    elif getattr(args, 'disabled_only', False):
+        filtered_peers = [p for p in peers if not p.get('status', False)]
+    
+    if not filtered_peers:
+        filter_text = "enabled" if getattr(args, 'enabled_only', False) else "disabled"
+        logger.info(f"No {filter_text} WireGuard peers found")
+        return
+    
+    # Count enabled/disabled
+    enabled_count = sum(1 for p in peers if p.get('status', False))
+    disabled_count = len(peers) - enabled_count
+    
+    logger.info(f"WireGuard Peers Summary: {enabled_count} enabled, {disabled_count} disabled")
+    logger.info(f"Showing {len(filtered_peers)} peers:")
+    
+    for peer in filtered_peers:
+        enabled = peer.get('status', False)
+        status_icon = "🟢" if enabled else "🔴"
+        status_text = "Enabled" if enabled else "Disabled"
+        
+        logger.info(f"  {status_icon} {peer.get('name', 'Unknown')} - {status_text}")
+        logger.info(f"    Interface: {peer.get('interfaceName', 'Unknown')}")
+        logger.info(f"    Allowed IPs: {', '.join(peer.get('allowAddress', []))}")
+        logger.info("")
+
+def cmd_wireguard_summary(controller, args):
+    """Show WireGuard summary with servers, peers, and connections"""
+    logger = logging.getLogger('omada_vpn')
+    
+    logger.info("WireGuard Summary")
+    logger.info("=" * 50)
+    
+    # Get servers
+    servers = controller.get_wireguard_servers(args.site)
+    if servers:
+        enabled_servers = sum(1 for s in servers if s.get('status', False))
+        logger.info(f"📡 Servers: {len(servers)} total, {enabled_servers} enabled")
+        for server in servers:
+            status_icon = "🟢" if server.get('status', False) else "🔴"
+            logger.info(f"  {status_icon} {server.get('name', 'Unknown')} (Port: {server.get('listenPort', 'N/A')})")
+    else:
+        logger.info("📡 Servers: None found")
+    
+    logger.info("")
+    
+    # Get peers
+    peers = controller.get_wireguard_peers(args.site)
+    if peers:
+        enabled_peers = sum(1 for p in peers if p.get('status', False))
+        logger.info(f"👥 Peers: {len(peers)} total, {enabled_peers} enabled")
+        for peer in peers:
+            status_icon = "🟢" if peer.get('status', False) else "🔴"
+            logger.info(f"  {status_icon} {peer.get('name', 'Unknown')}")
+    else:
+        logger.info("👥 Peers: None found")
+    
+    logger.info("")
+    
+    # Get active connections
+    insights = controller.get_wireguard_insights(args.site)
+    if insights:
+        logger.info(f"🔗 Active Connections: {len(insights)}")
+        for insight in insights:
+            peer_name = insight.get('name', 'Unknown')
+            last_handshake = insight.get('lastHandshake', 'N/A')
+            logger.info(f"  🔗 {peer_name} - Last: {last_handshake}")
+    else:
+        logger.info("🔗 Active Connections: None")
+    
+    logger.info("")
+    logger.info("=" * 50)
 
 def cmd_find_client(controller, args):
     """Find clients using advanced search"""
@@ -1172,6 +1617,57 @@ Examples:
     vpn_restart_parser = vpn_subparsers.add_parser('restart', help='Restart a VPN (disable, wait 2s, enable)')
     vpn_restart_parser.add_argument('name', help='VPN name')
     
+    # WireGuard commands
+    wg_parser = subparsers.add_parser('wireguard', help='WireGuard management')
+    wg_subparsers = wg_parser.add_subparsers(dest='wg_command', help='WireGuard commands')
+    
+    wg_peers_parser = wg_subparsers.add_parser('peers', help='List WireGuard peers')
+    wg_peers_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    wg_peers_parser.add_argument('--page', type=int, default=1, help='Page number')
+    wg_peers_parser.add_argument('--page-size', type=int, default=10, help='Items per page')
+    wg_peers_parser.add_argument('--raw', action='store_true', help='Show raw API response for debugging')
+    
+    wg_servers_parser = wg_subparsers.add_parser('servers', help='List WireGuard servers')
+    wg_servers_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    wg_servers_parser.add_argument('--page', type=int, default=1, help='Page number')
+    wg_servers_parser.add_argument('--page-size', type=int, default=10, help='Items per page')
+    wg_servers_parser.add_argument('--raw', action='store_true', help='Show raw API response for debugging')
+    
+    wg_insights_parser = wg_subparsers.add_parser('insights', help='Show WireGuard connection insights')
+    wg_insights_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    wg_insights_parser.add_argument('--page', type=int, default=1, help='Page number')
+    wg_insights_parser.add_argument('--page-size', type=int, default=10, help='Items per page')
+    wg_insights_parser.add_argument('--server-filter', type=int, default=0, help='Server filter (0 for all)')
+    wg_insights_parser.add_argument('--raw', action='store_true', help='Show raw API response for debugging')
+    
+    wg_summary_parser = wg_subparsers.add_parser('summary', help='Show WireGuard summary')
+    wg_summary_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    
+    # WireGuard peer management
+    wg_peer_parser = wg_subparsers.add_parser('peer', help='WireGuard peer management')
+    wg_peer_subparsers = wg_peer_parser.add_subparsers(dest='wg_peer_command', help='Peer commands')
+    
+    wg_peer_enable_parser = wg_peer_subparsers.add_parser('enable', help='Enable a WireGuard peer')
+    wg_peer_enable_parser.add_argument('name', help='Peer name')
+    wg_peer_enable_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    
+    wg_peer_disable_parser = wg_peer_subparsers.add_parser('disable', help='Disable a WireGuard peer')
+    wg_peer_disable_parser.add_argument('name', help='Peer name')
+    wg_peer_disable_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    
+    wg_peer_status_parser = wg_peer_subparsers.add_parser('status', help='Check WireGuard peer status')
+    wg_peer_status_parser.add_argument('name', help='Peer name')
+    wg_peer_status_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    
+    wg_peer_restart_parser = wg_peer_subparsers.add_parser('restart', help='Restart a WireGuard peer')
+    wg_peer_restart_parser.add_argument('name', help='Peer name')
+    wg_peer_restart_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    
+    wg_peer_list_parser = wg_peer_subparsers.add_parser('list', help='List all WireGuard peers with status')
+    wg_peer_list_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+    wg_peer_list_parser.add_argument('--enabled-only', action='store_true', help='Show only enabled peers')
+    wg_peer_list_parser.add_argument('--disabled-only', action='store_true', help='Show only disabled peers')
+    
     # Alerts command
     alerts_parser = subparsers.add_parser('alerts', help='Show recent alerts')
     alerts_parser.add_argument('--limit', type=int, default=10, help='Number of alerts to show')
@@ -1262,6 +1758,30 @@ def main():
                 cmd_vpn_restart(controller, args)
             else:
                 parser.parse_args(['vpn', '--help'])
+        elif args.command == 'wireguard':
+            if args.wg_command == 'peers':
+                cmd_wireguard_peers(controller, args)
+            elif args.wg_command == 'servers':
+                cmd_wireguard_servers(controller, args)
+            elif args.wg_command == 'insights':
+                cmd_wireguard_insights(controller, args)
+            elif args.wg_command == 'summary':
+                cmd_wireguard_summary(controller, args)
+            elif args.wg_command == 'peer':
+                if args.wg_peer_command == 'enable':
+                    cmd_wireguard_peer_enable(controller, args)
+                elif args.wg_peer_command == 'disable':
+                    cmd_wireguard_peer_disable(controller, args)
+                elif args.wg_peer_command == 'status':
+                    cmd_wireguard_peer_status(controller, args)
+                elif args.wg_peer_command == 'restart':
+                    cmd_wireguard_peer_restart(controller, args)
+                elif args.wg_peer_command == 'list':
+                    cmd_wireguard_peer_list(controller, args)
+                else:
+                    parser.parse_args(['wireguard', 'peer', '--help'])
+            else:
+                parser.parse_args(['wireguard', '--help'])
         elif args.command == 'alerts':
             cmd_alerts(controller, args)
         elif args.command == 'find':
