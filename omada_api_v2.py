@@ -237,7 +237,8 @@ class OmadaController:
         if not site_key:
             return None
             
-        result = self.make_api_call(f"sites/{site_key}/dashboard/snapshot")
+        result = self.make_api_call(f"sites/{site_key}/dashboard/overviewDiagram")
+        
         return result['result'] if result else None
     
     def get_devices_list(self, site_key=None) -> List[Dict]:
@@ -380,12 +381,14 @@ class OmadaController:
             return {}
             
         return {
-            'total_devices': dashboard.get('deviceNum', 0),
-            'online_devices': dashboard.get('connectedNum', 0),
-            'total_clients': dashboard.get('clientNum', 0),
+            'Total_Gateway_Num': dashboard.get('totalGatewayNum', 0),
+            'Total_Switch_Num': dashboard.get('totalSwitchNum', 0),
+            'Total_Ap_Num': dashboard.get('totalApNum', 0),
+            'Total_Clients': dashboard.get('totalClientNum', 0),
             'wired_clients': dashboard.get('wiredClientNum', 0),
             'wireless_clients': dashboard.get('wirelessClientNum', 0),
-            'guest_clients': dashboard.get('guestNum', 0)
+            'guest_clients': dashboard.get('guestNum', 0),
+            'wan_Port_Info': dashboard.get('wanPortInfos')
         }
     
     def find_device_by_name(self, device_name: str, site_key=None) -> Optional[Dict]:
