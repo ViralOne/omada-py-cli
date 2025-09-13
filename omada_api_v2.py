@@ -914,7 +914,10 @@ def cmd_find_client(controller, args):
     results = controller.search_clients(args.name, args.site, args.active_only, search_type, limit)
     
     if not results:
-        logger.info(f"No clients found matching '{args.name}' using {search_type} search")
+        status_text = "active" if args.active_only else "all"
+        logger.info(f"No {status_text} clients found matching '{args.name}' using {search_type} search")
+        if args.active_only:
+            logger.info("💡 Try searching all clients: --all")
         if search_type != 'fuzzy':
             logger.info("💡 Try using fuzzy search: --search-type fuzzy")
         return
@@ -926,11 +929,16 @@ def cmd_find_client(controller, args):
         logger.info(f"  MAC: {client.get('mac', 'Unknown')}")
         logger.info(f"  IP: {client.get('ip', 'No IP')}")
     else:
-        logger.info(f"🔍 Found {len(results)} clients matching '{args.name}':")
+        status_text = "active" if args.active_only else "all"
+        logger.info(f"🔍 Found {len(results)} {status_text} clients matching '{args.name}':")
         for i, client in enumerate(results, 1):
-            logger.info(f"  {i}. {client.get('name', 'Unknown')}")
-            logger.info(f"     MAC: {client.get('mac', 'Unknown')} | IP: {client.get('ip', 'No IP')}")
+            name = client.get('name', 'Unknown')
+            mac = client.get('mac', 'Unknown')
+            ip = client.get('ip', 'No IP')
+            logger.info(f"  {i}. {name}")
+            logger.info(f"     MAC: {mac} | IP: {ip}")
             logger.info(f"     Match: {client['_match_reason']} (score: {client['_match_score']})")
+
 
 def cmd_wireguard_peers(controller, args):
     """List WireGuard peers"""
@@ -1211,51 +1219,6 @@ def cmd_wireguard_summary(controller, args):
     logger.info("")
     logger.info("=" * 50)
 
-def cmd_find_client(controller, args):
-    """Find clients using advanced search"""
-    logger = logging.getLogger('omada_api')
-    search_type = getattr(args, 'search_type', 'fuzzy')
-    limit = getattr(args, 'limit', 10)
-    
-    # Try exact match first
-    if search_type == 'fuzzy':
-        exact_client = controller.find_client_by_name(args.name, args.site, args.active_only)
-        if exact_client:
-            logger.info(f"🎯 Exact match found:")
-            logger.info(f"  Name: {exact_client.get('name', 'Unknown')}")
-            logger.info(f"  MAC: {exact_client.get('mac', 'Unknown')}")
-            logger.info(f"  IP: {exact_client.get('ip', 'No IP')}")
-            return
-    
-    # Use advanced search
-    results = controller.search_clients(args.name, args.site, args.active_only, search_type, limit)
-    
-    if not results:
-        status_text = "active" if args.active_only else "all"
-        logger.info(f"No {status_text} clients found matching '{args.name}' using {search_type} search")
-        if args.active_only:
-            logger.info("💡 Try searching all clients: --all")
-        if search_type != 'fuzzy':
-            logger.info("💡 Try using fuzzy search: --search-type fuzzy")
-        return
-    
-    if len(results) == 1:
-        client = results[0]
-        logger.info(f"🎯 Client found ({client['_match_reason']}):")
-        logger.info(f"  Name: {client.get('name', 'Unknown')}")
-        logger.info(f"  MAC: {client.get('mac', 'Unknown')}")
-        logger.info(f"  IP: {client.get('ip', 'No IP')}")
-    else:
-        status_text = "active" if args.active_only else "all"
-        logger.info(f"🔍 Found {len(results)} {status_text} clients matching '{args.name}':")
-        for i, client in enumerate(results, 1):
-            name = client.get('name', 'Unknown')
-            mac = client.get('mac', 'Unknown')
-            ip = client.get('ip', 'No IP')
-            logger.info(f"  {i}. {name}")
-            logger.info(f"     MAC: {mac} | IP: {ip}")
-            logger.info(f"     Match: {client['_match_reason']} (score: {client['_match_score']})")
-
 # Custom Actions System
 class CustomAction:
     """Base class for custom actions"""
@@ -1293,25 +1256,11 @@ class VPNHealthCheckAction(CustomAction):
             return True
         
         # Separate client VPNs from server VPNs
-        # Client VPNs typically have purpose=1 (client-to-site) and mode indicators
         client_vpns = []
         server_vpns = []
         
         for vpn in enabled_vpns:
             vpn_name = vpn.get('name', 'Unknown')
-            
-            
-            # Correct VPN type detection logic based on actual data:
-            # 
-            # Client VPNs have:
-            # - clientVpnType1: 1 (indicates it's a client)
-            # - remoteIp: <actual_ip> (server they connect to)
-            # - vpnConfiguration: {...} (client config file)
-            #
-            # Server VPNs have:
-            # - clientVpnType1: 0 (indicates it's NOT a client, so it's a server)
-            # - remoteIp: not_present (they don't connect out, they accept connections)
-            # - vpnConfiguration: not_present (no client config needed)
             
             is_client_vpn = False
             
@@ -1531,7 +1480,7 @@ CUSTOM_ACTIONS = {
 def cmd_custom_action(controller, args):
     """Execute a custom action"""
     logger = logging.getLogger('omada_api')
-    action_name = args.action_name
+    action_name = args.action_command
     
     if action_name not in CUSTOM_ACTIONS:
         logger.error(f"Unknown custom action: {action_name}")
@@ -1568,13 +1517,13 @@ Examples:
   %(prog)s vpn status MyVPN                # Check VPN status
   %(prog)s alerts --limit 10               # Show 10 recent alerts
   %(prog)s find device "Router"            # Find device by name (fuzzy search)
-  %(prog)s find device --search-type mac "aa:bb:cc"  # Find device by MAC
+  %(prog)s find device --search-type mac "aa:bb:cc" # Find device by MAC
   %(prog)s find client "Galaxy"            # Find client by name (fuzzy search)
   %(prog)s find client --search-type ip "192.168"    # Find client by IP
   %(prog)s find client --all "Phone"       # Search all clients (not just active)
-  %(prog)s action vpn-health-check         # Check VPN health and restart if needed
-  %(prog)s action network-status           # Generate network status report
-  %(prog)s action vpn-bulk-restart --force # Restart all enabled VPNs
+  %(prog)s actions vpn-health-check        # Check VPN health and restart if needed
+  %(prog)s actions network-status          # Generate network status report
+  %(prog)s actions vpn-bulk-restart --force # Restart all enabled VPNs
         """
     )
     
@@ -1694,12 +1643,14 @@ Examples:
     find_client_parser.add_argument('--limit', type=int, default=10, help='Maximum results to show')
     
     # Custom Actions command
-    action_parser = subparsers.add_parser('action', help='Execute custom actions')
-    action_parser.add_argument('action_name', choices=list(CUSTOM_ACTIONS.keys()), 
-                              help='Custom action to execute')
-    action_parser.add_argument('--force', action='store_true', 
-                              help='Skip confirmation prompts')
-    
+    actions_parser = subparsers.add_parser('actions', help='Execute custom actions', aliases=['action'])
+    actions_subparsers = actions_parser.add_subparsers(dest='action_command', help='Custom action commands')
+
+    for name, action_obj in CUSTOM_ACTIONS.items():
+        sub_parser = actions_subparsers.add_parser(name, help=action_obj.description)
+        if name == 'vpn-bulk-restart':
+            sub_parser.add_argument('--force', action='store_true', help='Skip confirmation prompts')
+
     return parser
 
 def main():
@@ -1794,8 +1745,11 @@ def main():
                 cmd_find_client(controller, args)
             else:
                 parser.parse_args(['find', '--help'])
-        elif args.command == 'action':
-            cmd_custom_action(controller, args)
+        elif args.command in ['actions', 'action']:
+            if hasattr(args, 'action_command') and args.action_command:
+                cmd_custom_action(controller, args)
+            else:
+                parser.parse_args([args.command, '--help'])
         
     except ConnectionError as e:
         logger.error(f"Connection error: {e}")
