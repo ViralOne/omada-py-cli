@@ -110,9 +110,13 @@ python3 omada_api_v1.py
 **Key Features**:
 
 - Full network monitoring
-- Site-to-Site VPN management
+- VPN management
+- Wireguard management
 - Device and client management
+- Alerts
+- Device/Client finder
 - Real-time statistics
+- Predefined custom actions
 
 **Usage Examples**:
 
@@ -123,13 +127,20 @@ python3 omada_api_v2.py summary                  # Network summary
 python3 omada_api_v2.py devices                  # List devices
 python3 omada_api_v2.py clients --limit 20       # List clients
 
-# VPN Management (Site-to-Site)
+# VPN Management
 python3 omada_api_v2.py vpn list                 # List VPN configs
 python3 omada_api_v2.py vpn tunnels              # Active tunnels
 python3 omada_api_v2.py vpn enable "MyVPN"       # Enable VPN
 python3 omada_api_v2.py vpn disable "MyVPN"      # Disable VPN
 python3 omada_api_v2.py vpn restart "MyVPN"      # Restart VPN
 python3 omada_api_v2.py vpn status "MyVPN"       # Check status
+
+# Wireguard Management
+python3 omada_api_v2.py wireguard peers          # List WireGuard peers
+python3 omada_api_v2.py wireguard peer           # WireGuard peer management
+python3 omada_api_v2.py wireguard servers        # List WireGuard servers
+python3 omada_api_v2.py wireguard insights       # Show WireGuard connection insights
+python3 omada_api_v2.py wireguard summary        # Show WireGuard summary
 
 # Monitoring & Troubleshooting
 python3 omada_api_v2.py alerts --limit 10        # Recent alerts
