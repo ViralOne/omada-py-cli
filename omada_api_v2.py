@@ -68,28 +68,111 @@ class OmadaController:
     def _debug_print(self, message):
         if self.debug:
             self.logger.debug(message)
+
+    def _request(self, endpoint: str, method: str = "GET", params: Dict = None, data: Dict = None, 
+                 add_token: bool = True, retry_auth: bool = True) -> Optional[Dict]:
+        """
+        Centralized request method that handles all API calls with automatic authentication
         
-    def connect(self) -> bool:
-        """Complete connection process: get controller ID and login"""
-        if not self.get_controller_id():
-            self.logger.error("Failed to get controller ID.")
-            return False
+        Args:
+            endpoint: API endpoint (without base URL and controller ID)
+            method: HTTP method
+            params: Query parameters
+            data: Request body data
+            add_token: Whether to add authentication token
+            retry_auth: Whether to retry authentication on failure
+        """
+        # Ensure we have controller ID and are authenticated
+        if not self._ensure_ready():
+            return None
         
-        if not self.login():
-            self.logger.error("Login failed.")
-            return False
+        try:
+            # Build URL
+            url = urljoin(self.base_url, f"/{self.controller_id}/api/v2/{endpoint}")
+            
+            # Prepare headers
+            headers = {"Content-Type": "application/json"}
+            if self.token:
+                headers["Csrf-Token"] = self.token
+            
+            # Add token to params if requested
+            if add_token and self.token:
+                if params is None:
+                    params = {}
+                if "token" not in params:
+                    params["token"] = self.token
+            
+            self._debug_print(f"Request - Method: {method}, URL: {url}")
+            self._debug_print(f"Request - Params: {params}")
+            
+            # Make the request
+            response = self._make_http_request(url, method, headers, params, data)
+            
+            if response is None:
+                return None
+            
+            # Parse response
+            try:
+                result = response.json()
+            except json.JSONDecodeError:
+                self.logger.error("Invalid JSON response")
+                return None
+            
+            # Check for API errors
+            if result.get('errorCode') != 0:
+                error_msg = result.get('msg', 'Unknown error')
+                
+                # Handle authentication errors with retry
+                if retry_auth and ('login' in error_msg.lower() or 'auth' in error_msg.lower() or result.get('errorCode') == -1010):
+                    self.logger.warning(f"Authentication error detected: {error_msg}")
+                    if self._reauthenticate():
+                        self.logger.info("Reauthentication successful, retrying request...")
+                        return self._request(endpoint, method, params, data, add_token, retry_auth=False)
+                
+                self.logger.error(f"API Error: {error_msg}")
+                return None
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error making request to {endpoint}: {e}")
+            return None
+
+    def _make_http_request(self, url: str, method: str, headers: Dict, params: Dict, data: Dict):
+        """Make the actual HTTP request"""
+        try:
+            if method.upper() == "GET":
+                return self.session.get(url, params=params, headers=headers)
+            elif method.upper() == "POST":
+                return self.session.post(url, params=params, json=data, headers=headers)
+            elif method.upper() == "PUT":
+                return self.session.put(url, params=params, json=data, headers=headers)
+            elif method.upper() == "PATCH":
+                return self.session.patch(url, params=params, json=data, headers=headers)
+            elif method.upper() == "DELETE":
+                return self.session.delete(url, params=params, headers=headers)
+            else:
+                self.logger.error(f"Unsupported HTTP method: {method}")
+                return None
+        except requests.RequestException as e:
+            self.logger.error(f"HTTP request failed: {e}")
+            return None
+
+    def _ensure_ready(self) -> bool:
+        """Ensure controller ID is available and authentication is ready"""
+        # Get controller ID if not available
+        if not self.controller_id:
+            if not self._get_controller_id():
+                return False
         
-        self._authenticated = True
-        self.logger.info("Successfully connected to Omada Controller")
-        return True
-    
-    def ensure_authenticated(self) -> bool:
-        """Ensure we're authenticated, connect if not"""
+        # Authenticate if not already authenticated
         if not self._authenticated:
-            return self.connect()
-        return True
+            if not self._authenticate():
+                return False
         
-    def get_controller_id(self):
+        return True
+
+    def _get_controller_id(self) -> bool:
         """Get controller ID from the API"""
         try:
             url = urljoin(self.base_url, "/api/info")
@@ -101,16 +184,16 @@ class OmadaController:
             data = response.json()
             self.controller_id = data['result']['omadacId']
             self._debug_print(f"Controller ID: {self.controller_id}")
-            return self.controller_id
+            return True
             
         except Exception as e:
             self.logger.error(f"Error getting controller ID: {e}")
-            return None
-    
-    def login(self):
-        """Login and get authentication token"""
+            return False
+
+    def _authenticate(self) -> bool:
+        """Perform authentication and get token"""
         if not self.controller_id:
-            self.logger.error("Controller ID not set. Call get_controller_id() first.")
+            self.logger.error("Controller ID not available for authentication")
             return False
             
         try:
@@ -121,70 +204,54 @@ class OmadaController:
                 "password": self.password
             }
             
-            headers = {
-                "Content-Type": "application/json"
-            }
+            headers = {"Content-Type": "application/json"}
             
             response = self.session.post(url, json=login_data, headers=headers)
             response.raise_for_status()
             
             data = response.json()
+            if data.get('errorCode') != 0:
+                self.logger.error(f"Authentication failed: {data.get('msg', 'Unknown error')}")
+                return False
+            
             self.token = data['result']['token']
+            self._authenticated = True
+            self.logger.info("Authentication successful")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error during login: {e}")
+            self.logger.error(f"Error during authentication: {e}")
             return False
+
+    def _reauthenticate(self) -> bool:
+        """Reauthenticate after token expiry"""
+        self.logger.info("Attempting reauthentication...")
+        self._authenticated = False
+        self.token = None
+        return self._authenticate()
+
+    # Legacy methods for backward compatibility
+    def connect(self) -> bool:
+        """Legacy connect method - now just ensures ready state"""
+        return self._ensure_ready()
     
+    def ensure_authenticated(self) -> bool:
+        """Legacy authentication check - now just ensures ready state"""
+        return self._ensure_ready()
+    
+    def get_controller_id(self):
+        """Legacy controller ID getter"""
+        if self._get_controller_id():
+            return self.controller_id
+        return None
+    
+    def login(self):
+        """Legacy login method"""
+        return self._authenticate()
+
     def make_api_call(self, endpoint, method="GET", params=None, data=None, add_token=True):
-        """Generic method to make API calls with proper authentication"""
-        if not self.ensure_authenticated():
-            return None
-            
-        try:
-            url = urljoin(self.base_url, f"/{self.controller_id}/api/v2/{endpoint}")
-            
-            headers = {
-                "Content-Type": "application/json",
-                "Csrf-Token": self.token
-            }
-            
-            # Add token to params if requested and not already present
-            if add_token:
-                if params is None:
-                    params = {}
-                if "token" not in params:
-                    params["token"] = self.token
-            
-            self._debug_print(f"API Call - Method: {method}, URL: {url}")
-            self._debug_print(f"API Call - Params: {params}")
-            
-            if method.upper() == "GET":
-                response = self.session.get(url, params=params, headers=headers)
-            elif method.upper() == "POST":
-                response = self.session.post(url, params=params, json=data, headers=headers)
-            elif method.upper() == "PUT":
-                response = self.session.put(url, params=params, json=data, headers=headers)
-            elif method.upper() == "PATCH":
-                response = self.session.patch(url, params=params, json=data, headers=headers)
-            elif method.upper() == "DELETE":
-                response = self.session.delete(url, params=params, headers=headers)
-            else:
-                self.logger.error(f"Unsupported HTTP method: {method}")
-                return None
-            
-            response.raise_for_status()
-            result = response.json()
-            
-            if result.get('errorCode') != 0:
-                self.logger.error(f"API Error: {result.get('msg', 'Unknown error')}")
-                return None
-                
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"Error making API call to {endpoint}: {e}")
-            return None
+        """Legacy API call method - now uses centralized _request"""
+        return self._request(endpoint, method, params, data, add_token)
 
     def get_sites(self, force_refresh=False):
         """Get list of sites with proper pagination"""
@@ -196,7 +263,7 @@ class OmadaController:
             "currentPageSize": 100
         }
         
-        result = self.make_api_call("sites", params=params)
+        result = self._request("sites", params=params)
         if result:
             self.sites = result['result']['data']
             # Set the first site as current if no site is selected
@@ -230,15 +297,14 @@ class OmadaController:
                 return site
         return None
 
-    # Simplified API methods with better return values
+    # Simplified API methods using centralized request handling
     def get_dashboard(self, site_key=None) -> Optional[Dict]:
         """Get dashboard snapshot for a site"""
         site_key = site_key or self.current_site_key
         if not site_key:
             return None
             
-        result = self.make_api_call(f"sites/{site_key}/dashboard/overviewDiagram")
-        
+        result = self._request(f"sites/{site_key}/dashboard/overviewDiagram")
         return result['result'] if result else None
     
     def get_devices_list(self, site_key=None) -> List[Dict]:
@@ -252,7 +318,7 @@ class OmadaController:
             "currentPageSize": 1000
         }
         
-        result = self.make_api_call(f"sites/{site_key}/devices", params=params)
+        result = self._request(f"sites/{site_key}/devices", params=params)
         return result['result'] if result else []
     
     def get_clients_list(self, site_key=None, active_only=True) -> List[Dict]:
@@ -269,7 +335,7 @@ class OmadaController:
         if active_only:
             params["filters.active"] = "true"
         
-        result = self.make_api_call(f"sites/{site_key}/clients", params=params)
+        result = self._request(f"sites/{site_key}/clients", params=params)
         return result['result']['data'] if result and 'result' in result else []
     
     def get_vpn_tunnels(self, site_key=None, server_type=None) -> List[Dict]:
@@ -293,7 +359,7 @@ class OmadaController:
                 "filters.server": server_type
             }
             
-            result = self.make_api_call(f"sites/{site_key}/setting/vpn/stats/tunnel", params=params)
+            result = self._request(f"sites/{site_key}/setting/vpn/stats/tunnel", params=params)
             return result['result']['data'] if result and 'result' in result else []
         
         # Get both server (0) and client (1) tunnels
@@ -304,7 +370,7 @@ class OmadaController:
                 "filters.server": tunnel_type
             }
             
-            result = self.make_api_call(f"sites/{site_key}/setting/vpn/stats/tunnel", params=params)
+            result = self._request(f"sites/{site_key}/setting/vpn/stats/tunnel", params=params)
             if result and 'result' in result and 'data' in result['result']:
                 tunnels = result['result']['data']
                 # Add tunnel type info for debugging
@@ -320,7 +386,7 @@ class OmadaController:
         if not site_key:
             return []
             
-        result = self.make_api_call(f"sites/{site_key}/setting/vpns")
+        result = self._request(f"sites/{site_key}/setting/vpns")
         if result and 'result' in result:
             vpns_data = result['result']
             return vpns_data if isinstance(vpns_data, list) else vpns_data.get('data', [])
@@ -346,10 +412,10 @@ class OmadaController:
         
         # Update the VPN configuration with new status
         updated_config = vpn_config.copy()
-        updated_config['status'] = enabled  # Use 'status' instead of 'enable'
+        updated_config['status'] = enabled
         
-        result = self.make_api_call(f"sites/{site_key}/setting/vpns/{vpn_config['id']}", 
-                                  method="PATCH", data=updated_config)
+        result = self._request(f"sites/{site_key}/setting/vpns/{vpn_config['id']}", 
+                              method="PATCH", data=updated_config)
         
         if result:
             # Verify the change by getting fresh config
@@ -370,7 +436,7 @@ class OmadaController:
             "currentPageSize": limit
         }
         
-        result = self.make_api_call(f"sites/{site_key}/alerts", params=params)
+        result = self._request(f"sites/{site_key}/alerts", params=params)
         return result['result']['data'] if result and 'result' in result else []
 
     # Utility methods for easy access to common info
@@ -566,10 +632,10 @@ class OmadaController:
         vpns = self.get_vpn_configs(site_key)
         for vpn in vpns:
             if vpn.get('name') == vpn_name:
-                return vpn.get('status', False)  # Use 'status' instead of 'enable'
+                return vpn.get('status', False)
         return None
 
-    # WireGuard Methods
+    # WireGuard Methods using centralized request handling
     def get_wireguard_peers(self, site_key=None, page=1, page_size=10) -> List[Dict]:
         """Get WireGuard peers list"""
         site_key = site_key or self.current_site_key
@@ -581,7 +647,7 @@ class OmadaController:
             "currentPageSize": page_size
         }
         
-        result = self.make_api_call(f"sites/{site_key}/setting/wireguard/peer", params=params)
+        result = self._request(f"sites/{site_key}/setting/wireguard/peer", params=params)
         return result['result']['data'] if result and 'result' in result else []
     
     def get_wireguard_servers(self, site_key=None, page=1, page_size=10) -> List[Dict]:
@@ -595,18 +661,11 @@ class OmadaController:
             "currentPageSize": page_size
         }
         
-        result = self.make_api_call(f"sites/{site_key}/setting/wireguard", params=params)
+        result = self._request(f"sites/{site_key}/setting/wireguard", params=params)
         return result['result']['data'] if result and 'result' in result else []
     
     def get_wireguard_insights(self, site_key=None, page=1, page_size=10, server_filter=0) -> List[Dict]:
-        """Get WireGuard connection insights
-        
-        Args:
-            site_key: Site key (uses current site if None)
-            page: Page number for pagination
-            page_size: Number of items per page
-            server_filter: Server filter (0 for all, specific server ID for filtering)
-        """
+        """Get WireGuard connection insights"""
         site_key = site_key or self.current_site_key
         if not site_key:
             return []
@@ -617,56 +676,39 @@ class OmadaController:
             "filters.server": server_filter
         }
         
-        result = self.make_api_call(f"sites/{site_key}/insight/wireguard", params=params)
+        result = self._request(f"sites/{site_key}/insight/wireguard", params=params)
         return result['result']['data'] if result and 'result' in result else []
     
     def create_wireguard_peer(self, peer_config: Dict, site_key=None) -> bool:
-        """Create a new WireGuard peer
-        
-        Args:
-            peer_config: Dictionary containing peer configuration
-            site_key: Site key (uses current site if None)
-        """
+        """Create a new WireGuard peer"""
         site_key = site_key or self.current_site_key
         if not site_key:
             return False
             
-        result = self.make_api_call(f"sites/{site_key}/setting/wireguard/peer", 
-                                  method="POST", data=peer_config)
+        result = self._request(f"sites/{site_key}/setting/wireguard/peer", 
+                              method="POST", data=peer_config)
         return result is not None
     
     def update_wireguard_peer(self, peer_id: str, peer_config: Dict, site_key=None) -> bool:
-        """Update an existing WireGuard peer
-        
-        Args:
-            peer_id: ID of the peer to update
-            peer_config: Dictionary containing updated peer configuration
-            site_key: Site key (uses current site if None)
-        """
+        """Update an existing WireGuard peer"""
         site_key = site_key or self.current_site_key
         if not site_key:
             return False
         
         self.logger.debug(f"Updating WireGuard peer {peer_id} with config: {peer_config}")
         
-        # Use PUT method with the peer ID in the URL as shown in your example
-        result = self.make_api_call(f"sites/{site_key}/setting/wireguard/peer/{peer_id}", 
-                                  method="PUT", data=peer_config)
+        result = self._request(f"sites/{site_key}/setting/wireguard/peer/{peer_id}", 
+                              method="PUT", data=peer_config)
         return result is not None
     
     def delete_wireguard_peer(self, peer_id: str, site_key=None) -> bool:
-        """Delete a WireGuard peer
-        
-        Args:
-            peer_id: ID of the peer to delete
-            site_key: Site key (uses current site if None)
-        """
+        """Delete a WireGuard peer"""
         site_key = site_key or self.current_site_key
         if not site_key:
             return False
             
-        result = self.make_api_call(f"sites/{site_key}/setting/wireguard/peer/{peer_id}", 
-                                  method="DELETE")
+        result = self._request(f"sites/{site_key}/setting/wireguard/peer/{peer_id}", 
+                              method="DELETE")
         return result is not None
     
     def get_wireguard_peer_by_name(self, peer_name: str, site_key=None) -> Optional[Dict]:
@@ -678,31 +720,21 @@ class OmadaController:
         return None
     
     def toggle_wireguard_peer(self, peer_name: str, enabled: bool, site_key=None) -> bool:
-        """Enable or disable a WireGuard peer by name
-        
-        Args:
-            peer_name: Name of the peer to toggle
-            enabled: True to enable, False to disable
-            site_key: Site key (uses current site if None)
-        """
+        """Enable or disable a WireGuard peer by name"""
         peer = self.get_wireguard_peer_by_name(peer_name, site_key)
         if not peer:
             self.logger.error(f"WireGuard peer '{peer_name}' not found")
             return False
         
         updated_config = peer.copy()
-        updated_config['status'] = enabled  # Use 'status' instead of 'enable'
+        updated_config['status'] = enabled
         
         return self.update_wireguard_peer(peer['id'], updated_config, site_key)
 
 def create_controller(base_url: str, username: str, password: str, debug: bool = False) -> OmadaController:
-    """Factory function to create and connect to Omada Controller"""
+    """Factory function to create Omada Controller with lazy authentication"""
     controller = OmadaController(base_url, username, password, debug)
-    if controller.connect():
-        controller.get_sites()  # Load sites immediately
-        return controller
-    else:
-        raise ConnectionError("Failed to connect to Omada Controller")
+    return controller
 
 def get_config():
     """Get configuration from environment variables or defaults"""
@@ -1633,15 +1665,15 @@ Examples:
     find_device_parser.add_argument('--search-type', choices=['exact', 'partial', 'fuzzy', 'mac', 'model'], 
                                    default='fuzzy', help='Search method (default: fuzzy)')
     find_device_parser.add_argument('--limit', type=int, default=10, help='Maximum results to show')
-    
+
     find_client_parser = find_subparsers.add_parser('client', help='Find client by name')
     find_client_parser.add_argument('name', help='Client name, MAC address, or IP')
     find_client_parser.add_argument('--active-only', action='store_true', default=True, help='Search only active clients')
     find_client_parser.add_argument('--all', action='store_true', help='Search all clients (active and inactive)')
     find_client_parser.add_argument('--search-type', choices=['exact', 'partial', 'fuzzy', 'mac', 'ip'], 
-                                   default='fuzzy', help='Search method (default: fuzzy)')
+                                default='fuzzy', help='Search method (default: fuzzy)')
     find_client_parser.add_argument('--limit', type=int, default=10, help='Maximum results to show')
-    
+
     # Custom Actions command
     actions_parser = subparsers.add_parser('actions', help='Execute custom actions', aliases=['action'])
     actions_subparsers = actions_parser.add_subparsers(dest='action_command', help='Custom action commands')
@@ -1657,26 +1689,29 @@ def main():
     load_dotenv()
     parser = create_parser()
     args = parser.parse_args()
-    
+
     # Setup logging first
     setup_logging(getattr(args, 'debug', False))
     logger = logging.getLogger('omada_api')
-    
+
     if not args.command:
         parser.print_help()
         return
-    
+
     # Get configuration
     config = get_config()
-    
+
     # Override with command line arguments
     url = args.url or config['url']
     username = args.username or config['username']
     password = args.password or config['password']
-    
+
     try:
-        # Create controller connection
+        # Create controller connection (no explicit connection needed)
         controller = create_controller(url, username, password, args.debug)
+        
+        # Load sites immediately for better UX
+        controller.get_sites()
         
         # Set site if specified
         if args.site:
