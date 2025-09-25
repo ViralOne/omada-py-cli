@@ -649,7 +649,7 @@ class OmadaController:
         
         result = self._request(f"sites/{site_key}/setting/wireguard/peer", params=params)
         return result['result']['data'] if result and 'result' in result else []
-    
+        
     def get_wireguard_servers(self, site_key=None, page=1, page_size=10) -> List[Dict]:
         """Get WireGuard servers list"""
         site_key = site_key or self.current_site_key
@@ -1050,12 +1050,45 @@ def cmd_wireguard_servers(controller, args):
         if local_ip:
             logger.info(f"    External IP: {local_ip}")
         
-        # Show MTU
-        mtu = server.get('mtu')
-        if mtu:
-            logger.info(f"    MTU: {mtu}")
+        # Show ID
+        server_id = server.get('id')
+        if server_id:
+            logger.info(f"    Interface-id: {server_id}")
         
         logger.info("")  # Empty line between servers
+
+
+def cmd_wireguard_peer_create(controller, args):
+    """Create a new WireGuard peer"""
+    logger = logging.getLogger('omada_vpn')
+    peer_config = {
+        "name": args.name,
+        "interfaceId": args.interface_id,
+        "publicKey": args.public_key,
+        "endPoint": args.endpoint,
+        "endPointPort": args.endpoint_port,
+        "allowAddress": args.allow_address,
+        "keepAlive": args.keep_alive,
+        "status": args.status
+    }
+    logger.debug(f"Creating WireGuard peer with config: {peer_config}")
+    if controller.create_wireguard_peer(peer_config, args.site):
+        logger.info(f"WireGuard peer '{args.name}' created successfully")
+    else:
+        logger.error(f"Failed to create WireGuard peer '{args.name}'")
+
+def cmd_wireguard_peer_delete(controller, args):
+    """Delete a WireGuard peer by name"""
+    logger = logging.getLogger('omada_vpn')
+    peer = controller.get_wireguard_peer_by_name(args.name, args.site)
+    if not peer:
+        logger.error(f"WireGuard peer '{args.name}' not found")
+        return
+    peer_id = peer.get('id')
+    if controller.delete_wireguard_peer(peer_id, args.site):
+        logger.info(f"WireGuard peer '{args.name}' deleted successfully")
+    else:
+        logger.error(f"Failed to delete WireGuard peer '{args.name}'")
 
 def cmd_wireguard_insights(controller, args):
     """Show WireGuard connection insights"""
@@ -1202,6 +1235,7 @@ def cmd_wireguard_peer_list(controller, args):
         logger.info(f"  {status_icon} {peer.get('name', 'Unknown')} - {status_text}")
         logger.info(f"    Interface: {peer.get('interfaceName', 'Unknown')}")
         logger.info(f"    Allowed IPs: {', '.join(peer.get('allowAddress', []))}")
+        logger.info(f"    Peer ID: {peer.get('id', 'Unknown')}")
         logger.info("")
 
 def cmd_wireguard_summary(controller, args):
@@ -1631,6 +1665,21 @@ Examples:
     wg_peer_parser = wg_subparsers.add_parser('peer', help='WireGuard peer management')
     wg_peer_subparsers = wg_peer_parser.add_subparsers(dest='wg_peer_command', help='Peer commands')
     
+    wg_peer_create_parser = wg_peer_subparsers.add_parser('create', help='Create a new WireGuard peer')
+    wg_peer_create_parser.add_argument('name', help='Peer name')
+    wg_peer_create_parser.add_argument('--interface-id', required=True, help='WireGuard interface ID')
+    wg_peer_create_parser.add_argument('--public-key', required=True, help='Peer public key')
+    wg_peer_create_parser.add_argument('--endpoint', required=True, help='Peer endpoint IP or hostname')
+    wg_peer_create_parser.add_argument('--endpoint-port', type=int, required=True, help='Peer endpoint port')
+    wg_peer_create_parser.add_argument('--allow-address', nargs='+', required=True, help='Allowed IP addresses (space separated)')
+    wg_peer_create_parser.add_argument('--keep-alive', type=int, default=25, help='Keep alive interval (seconds)')
+    wg_peer_create_parser.add_argument('--status', action='store_true', default=True, help='Enable peer (default: enabled)')
+    wg_peer_create_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+
+    wg_peer_delete_parser = wg_peer_subparsers.add_parser('delete', help='Delete a WireGuard peer')
+    wg_peer_delete_parser.add_argument('name', help='Peer name')
+    wg_peer_delete_parser.add_argument('--site', help='Site key (uses current site if not specified)')
+
     wg_peer_enable_parser = wg_peer_subparsers.add_parser('enable', help='Enable a WireGuard peer')
     wg_peer_enable_parser.add_argument('name', help='Peer name')
     wg_peer_enable_parser.add_argument('--site', help='Site key (uses current site if not specified)')
@@ -1767,6 +1816,10 @@ def main():
                     cmd_wireguard_peer_restart(controller, args)
                 elif args.wg_peer_command == 'list':
                     cmd_wireguard_peer_list(controller, args)
+                elif args.wg_peer_command == 'create':
+                    cmd_wireguard_peer_create(controller, args)
+                elif args.wg_peer_command == 'delete':
+                    cmd_wireguard_peer_delete(controller, args)
                 else:
                     parser.parse_args(['wireguard', 'peer', '--help'])
             else:
