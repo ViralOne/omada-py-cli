@@ -439,6 +439,67 @@ class OmadaController:
         result = self._request(f"sites/{site_key}/alerts", params=params)
         return result['result']['data'] if result and 'result' in result else []
 
+    # Networking config methods (VLANs, SSIDs, ACLs, groups)
+    def get_networks(self, site_key=None) -> List[Dict]:
+        """Get wired LAN networks (VLANs) for a site"""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+
+        params = {"currentPage": 1, "currentPageSize": 100}
+        result = self._request(f"sites/{site_key}/setting/lan/networks", params=params)
+        return result['result']['data'] if result and 'result' in result else []
+
+    def get_wlan_groups(self, site_key=None) -> List[Dict]:
+        """Get WLAN groups for a site"""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+
+        result = self._request(f"sites/{site_key}/setting/wlans")
+        return result['result']['data'] if result and 'result' in result else []
+
+    def get_ssids(self, wlan_id=None, site_key=None) -> List[Dict]:
+        """Get SSIDs for a WLAN group (defaults to the primary group)"""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+
+        if not wlan_id:
+            groups = self.get_wlan_groups(site_key)
+            if not groups:
+                return []
+            primary = next((g for g in groups if g.get('primary')), groups[0])
+            wlan_id = primary['id']
+
+        params = {"currentPage": 1, "currentPageSize": 100}
+        result = self._request(f"sites/{site_key}/setting/wlans/{wlan_id}/ssids", params=params)
+        return result['result']['data'] if result and 'result' in result else []
+
+    def get_acls(self, acl_type="gateway", site_key=None) -> List[Dict]:
+        """Get ACL rules for a site. acl_type: gateway | switch | eap"""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+
+        type_map = {"gateway": 0, "switch": 1, "eap": 2}
+        params = {
+            "currentPage": 1,
+            "currentPageSize": 100,
+            "type": type_map.get(acl_type, 0),
+        }
+        result = self._request(f"sites/{site_key}/setting/firewall/acls", params=params)
+        return result['result']['data'] if result and 'result' in result else []
+
+    def get_groups(self, site_key=None) -> List[Dict]:
+        """Get IP / domain groups (profiles) for a site"""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+
+        result = self._request(f"sites/{site_key}/setting/profiles/groups")
+        return result['result']['data'] if result and 'result' in result else []
+
     # Utility methods for easy access to common info
     def get_network_summary(self, site_key=None) -> Dict:
         """Get a summary of network status"""
@@ -883,6 +944,80 @@ def cmd_alerts(controller, args):
     logger.info(f"Recent Alerts ({len(alerts)} total):")
     for alert in alerts:
         logger.info(f"  - {alert.get('msg', 'Unknown')} (Level: {alert.get('level', 'Unknown')})")
+
+def cmd_networks(controller, args):
+    """List wired networks (VLANs)"""
+    logger = logging.getLogger('omada_api')
+    networks = controller.get_networks(args.site)
+    if not networks:
+        logger.info("No networks found")
+        return
+
+    logger.info(f"Networks ({len(networks)} total):")
+    for net in networks:
+        vlan = net.get('vlan', 'N/A')
+        subnet = net.get('gatewaySubnet', 'N/A')
+        acl = " [ACL]" if net.get('accessControlRule') else ""
+        iso = " [isolated]" if net.get('isolation') else ""
+        primary = " (primary)" if net.get('primary') else ""
+        logger.info(f"  - {net.get('name', 'Unknown')} - VLAN {vlan} - {subnet}{acl}{iso}{primary}")
+        logger.info(f"    id: {net.get('id')}")
+
+def cmd_ssids(controller, args):
+    """List SSIDs"""
+    logger = logging.getLogger('omada_api')
+    ssids = controller.get_ssids(getattr(args, 'wlan_id', None), args.site)
+    if not ssids:
+        logger.info("No SSIDs found")
+        return
+
+    logger.info(f"SSIDs ({len(ssids)} total):")
+    for ssid in ssids:
+        vlan = ssid.get('vlanId') if ssid.get('vlanEnable') else 'untagged'
+        guest = " [guest]" if ssid.get('guestNetEnable') else ""
+        band = ssid.get('band', 'N/A')
+        logger.info(f"  - {ssid.get('name', 'Unknown')} - VLAN {vlan} - band {band}{guest}")
+        logger.info(f"    id: {ssid.get('id')}")
+
+def cmd_groups(controller, args):
+    """List IP / domain groups"""
+    logger = logging.getLogger('omada_api')
+    groups = controller.get_groups(args.site)
+    if not groups:
+        logger.info("No groups found")
+        return
+
+    logger.info(f"Groups ({len(groups)} total):")
+    for group in groups:
+        if group.get('ipList'):
+            rendered = ', '.join(f"{e['ip']}/{e['mask']}" for e in group['ipList'])
+        elif group.get('domainName'):
+            rendered = ', '.join(group['domainName'])
+        elif group.get('ipv6List'):
+            rendered = ', '.join(f"{e['ip']}/{e['prefix']}" for e in group['ipv6List'])
+        else:
+            rendered = "(empty)"
+        builtin = " [built-in]" if group.get('buildIn') else ""
+        logger.info(f"  - {group.get('name', 'Unknown')}{builtin}: {rendered}")
+        logger.info(f"    groupId: {group.get('groupId')}")
+
+def cmd_acl(controller, args):
+    """List ACL rules"""
+    logger = logging.getLogger('omada_api')
+    acl_type = getattr(args, 'type', 'gateway')
+    acls = controller.get_acls(acl_type, args.site)
+    if not acls:
+        logger.info(f"No {acl_type} ACL rules found")
+        return
+
+    logger.info(f"{acl_type.capitalize()} ACL rules ({len(acls)} total):")
+    for acl in acls:
+        policy = "PERMIT" if acl.get('policy') == 1 else "DENY"
+        status = "enabled" if acl.get('status') else "disabled"
+        logger.info(f"  [{acl.get('index')}] {acl.get('name', 'Unknown')} - {policy} - {status}")
+        logger.info(f"      srcType={acl.get('sourceType')} src={acl.get('sourceIds')}")
+        logger.info(f"      dstType={acl.get('destinationType')} dst={acl.get('destinationIds')}")
+        logger.info(f"      id: {acl.get('id')}")
 
 def cmd_find_device(controller, args):
     """Find devices using advanced search"""
@@ -1615,7 +1750,19 @@ Examples:
     clients_parser.add_argument('--active-only', action='store_true', default=True, help='Show only active clients')
     clients_parser.add_argument('--all', action='store_true', help='Show all clients (active and inactive)')
     clients_parser.add_argument('--limit', type=int, default=50, help='Limit number of results')
-    
+
+    # Networking config commands
+    subparsers.add_parser('networks', help='List wired networks (VLANs)')
+
+    ssids_parser = subparsers.add_parser('ssids', help='List SSIDs')
+    ssids_parser.add_argument('--wlan-id', help='WLAN group id (defaults to the primary group)')
+
+    subparsers.add_parser('groups', help='List IP / domain groups')
+
+    acl_parser = subparsers.add_parser('acl', help='List ACL rules')
+    acl_parser.add_argument('--type', choices=['gateway', 'switch', 'eap'], default='gateway',
+                            help='ACL type (default: gateway)')
+
     # VPN commands
     vpn_parser = subparsers.add_parser('vpn', help='VPN management')
     vpn_subparsers = vpn_parser.add_subparsers(dest='vpn_command', help='VPN commands')
@@ -1781,6 +1928,14 @@ def main():
             cmd_devices(controller, args)
         elif args.command == 'clients':
             cmd_clients(controller, args)
+        elif args.command == 'networks':
+            cmd_networks(controller, args)
+        elif args.command == 'ssids':
+            cmd_ssids(controller, args)
+        elif args.command == 'groups':
+            cmd_groups(controller, args)
+        elif args.command == 'acl':
+            cmd_acl(controller, args)
         elif args.command == 'vpn':
             if args.vpn_command == 'list':
                 cmd_vpn_list(controller, args)
