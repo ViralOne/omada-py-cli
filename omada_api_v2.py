@@ -329,12 +329,12 @@ class OmadaController:
             
         params = {
             "currentPage": 1,
-            "currentPageSize": 1000
+            "currentPageSize": 1000,
+            # The clients endpoint requires filters.active; omitting it returns
+            # a "General error". Send it explicitly for both active and all.
+            "filters.active": "true" if active_only else "false",
         }
-        
-        if active_only:
-            params["filters.active"] = "true"
-        
+
         result = self._request(f"sites/{site_key}/clients", params=params)
         return result['result']['data'] if result and 'result' in result else []
     
@@ -1131,7 +1131,8 @@ def cmd_wireguard_peers(controller, args):
         
         logger.info(f"  - {peer.get('name', 'Unknown')} - {status}")
         logger.info(f"    Interface: {peer.get('interfaceName', 'Unknown')}")
-        logger.info(f"    Public Key: {peer.get('publicKey', 'N/A')[:20]}...")
+        public_key = peer.get('publicKey') or 'N/A'
+        logger.info(f"    Public Key: {public_key[:20]}...")
         
         # Show allowed addresses (this is the correct field name)
         allowed_addresses = peer.get('allowAddress', [])
@@ -1307,12 +1308,13 @@ def cmd_wireguard_peer_status(controller, args):
     if not peer:
         logger.warning(f"WireGuard peer '{args.name}' not found")
     else:
-        status = "enabled" if peer.get('enable', False) else "disabled"
+        status = "enabled" if peer.get('status', False) else "disabled"
         logger.info(f"WireGuard peer '{args.name}' is {status}")
         logger.info(f"  Public Key: {peer.get('publicKey', 'N/A')}")
-        logger.info(f"  Allowed IPs: {peer.get('allowedIps', 'N/A')}")
-        if peer.get('endpoint'):
-            logger.info(f"  Endpoint: {peer.get('endpoint')}")
+        allowed = peer.get('allowAddress') or []
+        logger.info(f"  Allowed IPs: {', '.join(allowed) if allowed else 'N/A'}")
+        if peer.get('endPoint'):
+            logger.info(f"  Endpoint: {peer.get('endPoint')}:{peer.get('endPointPort', '')}")
 
 def cmd_wireguard_peer_restart(controller, args):
     """Restart a WireGuard peer (disable, wait 2 seconds, enable)"""
