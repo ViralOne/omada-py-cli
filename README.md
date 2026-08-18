@@ -164,6 +164,19 @@ python3 -m omada networks                 # List wired networks (VLANs)
 python3 -m omada ssids                    # List SSIDs
 python3 -m omada groups                   # List IP / domain groups
 python3 -m omada acl --type gateway       # List ACL rules (gateway|switch|eap)
+python3 -m omada status                   # WAN / internet status
+python3 -m omada ports                    # Gateway ports: PVID (VLAN) + link state
+python3 -m omada capabilities             # Controller feature/capacity map
+python3 -m omada dhcp list                # List fixed-IP reservations
+python3 -m omada dhcp reserve "Bulb" --ip 192.168.99.9   # Reserve a fixed IP
+python3 -m omada mdns list                # List mDNS reflector rules
+python3 -m omada mdns create "AirPlay" --service-networks <netId> --client-networks <netId> --dry-run
+
+# Client / device control
+python3 -m omada client show "Frigider"   # Single-client detail (IP/VLAN/SSID)
+python3 -m omada client block "Laptop" --dry-run    # Block a client (--dry-run first)
+python3 -m omada client unblock "Laptop"  # Unblock a client
+python3 -m omada device reboot "AP parter" --dry-run # Reboot a device (--dry-run first)
 
 # VPN Management
 python3 -m omada vpn list                 # List VPN configs

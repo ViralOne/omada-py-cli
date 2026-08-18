@@ -12,6 +12,9 @@ from .commands import (
     cmd_sites, cmd_summary, cmd_devices, cmd_clients,
     cmd_networks, cmd_ssids, cmd_groups, cmd_acl,
     cmd_acl_create, cmd_acl_edit, cmd_group_set_mask, cmd_mdns, cmd_dhcp_reserve,
+    cmd_dhcp_list, cmd_status, cmd_capabilities, cmd_ports, cmd_client,
+    cmd_client_block, cmd_client_unblock, cmd_device_reboot,
+    cmd_mdns_create, cmd_mdns_delete,
     cmd_vpn_tunnels, cmd_vpn_list, cmd_vpn_enable, cmd_vpn_disable,
     cmd_vpn_status, cmd_vpn_restart, cmd_alerts,
     cmd_find_device, cmd_find_client,
@@ -160,8 +163,54 @@ Examples:
     acl_edit.add_argument('--status', choices=['enable', 'disable'])
     acl_edit.add_argument('--dry-run', action='store_true', help='print the request body, do not write')
 
-    # mDNS reflector (read-only; enable payload undocumented on v6.2)
-    subparsers.add_parser('mdns', help='Show mDNS reflector state')
+    # mDNS reflector rules (setting/service/mdns)
+    mdns_parser = subparsers.add_parser('mdns', help='mDNS reflector rules (list/create/delete)')
+    mdns_sub = mdns_parser.add_subparsers(dest='mdns_command')
+    mdns_sub.add_parser('list', help='List mDNS reflector rules')
+    mdns_create = mdns_sub.add_parser('create', help='Create an mDNS reflector rule')
+    mdns_create.add_argument('name')
+    mdns_create.add_argument('--device-type', choices=['ap', 'gateway'], default='ap')
+    mdns_create.add_argument('--profile-ids', nargs='+', default=['buildIn-1'],
+                             help='Bonjour service profile ids (default: buildIn-1)')
+    mdns_create.add_argument('--service-networks', nargs='+', required=True,
+                             help='network id(s) hosting the service')
+    mdns_create.add_argument('--client-networks', nargs='+', required=True,
+                             help='network id(s) allowed to discover')
+    mdns_create.add_argument('--disabled', action='store_true', help='create the rule disabled')
+    mdns_create.add_argument('--dry-run', action='store_true', help='print the request body, do not write')
+    mdns_delete = mdns_sub.add_parser('delete', help='Delete an mDNS reflector rule')
+    mdns_delete.add_argument('--id', help='rule id to delete')
+    mdns_delete.add_argument('--name', help='rule name to locate (if --id not given)')
+    mdns_delete.add_argument('--dry-run', action='store_true', help='print the request, do not write')
+
+    # WAN/LAN status + capabilities + gateway ports
+    subparsers.add_parser('status', help='Show WAN/LAN status (internet links, IPs)')
+
+    cap_parser = subparsers.add_parser('capabilities', help='Show controller feature/capacity map')
+    cap_parser.add_argument('--all', action='store_true', help='include disabled/false features')
+    cap_parser.add_argument('--raw', action='store_true', help='print raw JSON')
+
+    ports_parser = subparsers.add_parser('ports', help='Show gateway ports (PVID/VLAN + link)')
+    ports_parser.add_argument('--mac', help='gateway MAC (default: the site gateway)')
+
+    # Single-client detail + block/unblock
+    client_parser = subparsers.add_parser('client', help='Client detail / block / unblock')
+    client_sub = client_parser.add_subparsers(dest='client_command')
+    c_show = client_sub.add_parser('show', help='Show client detail')
+    c_show.add_argument('client', help='client name or MAC')
+    c_block = client_sub.add_parser('block', help='Block a client')
+    c_block.add_argument('client', help='client name or MAC')
+    c_block.add_argument('--dry-run', action='store_true', help='print the request, do not write')
+    c_unblock = client_sub.add_parser('unblock', help='Unblock a client')
+    c_unblock.add_argument('client', help='client name or MAC')
+    c_unblock.add_argument('--dry-run', action='store_true', help='print the request, do not write')
+
+    # Device control
+    device_parser = subparsers.add_parser('device', help='Device control (reboot)')
+    device_sub = device_parser.add_subparsers(dest='device_command')
+    d_reboot = device_sub.add_parser('reboot', help='Reboot a managed device')
+    d_reboot.add_argument('device', help='device name or MAC')
+    d_reboot.add_argument('--dry-run', action='store_true', help='print the request, do not write')
 
     # Group write ops
     group_parser = subparsers.add_parser('group', help='IP/domain group operations')
@@ -174,6 +223,7 @@ Examples:
     # DHCP operations
     dhcp_parser = subparsers.add_parser('dhcp', help='DHCP operations')
     dhcp_sub = dhcp_parser.add_subparsers(dest='dhcp_command')
+    dhcp_sub.add_parser('list', help='List fixed-IP reservations')
     dres = dhcp_sub.add_parser('reserve', help='Reserve a fixed IP for a client')
     dres.add_argument('client', help='client name or MAC')
     dres.add_argument('--ip', help='IP to reserve (default: the client current IP)')
@@ -381,7 +431,34 @@ def main():
             else:
                 parser.parse_args(['acl', '--help'])
         elif args.command == 'mdns':
-            cmd_mdns(controller, args)
+            if args.mdns_command == 'create':
+                cmd_mdns_create(controller, args)
+            elif args.mdns_command == 'delete':
+                cmd_mdns_delete(controller, args)
+            elif args.mdns_command in ('list', None):
+                cmd_mdns(controller, args)
+            else:
+                parser.parse_args(['mdns', '--help'])
+        elif args.command == 'status':
+            cmd_status(controller, args)
+        elif args.command == 'capabilities':
+            cmd_capabilities(controller, args)
+        elif args.command == 'ports':
+            cmd_ports(controller, args)
+        elif args.command == 'client':
+            if args.client_command == 'show':
+                cmd_client(controller, args)
+            elif args.client_command == 'block':
+                cmd_client_block(controller, args)
+            elif args.client_command == 'unblock':
+                cmd_client_unblock(controller, args)
+            else:
+                parser.parse_args(['client', '--help'])
+        elif args.command == 'device':
+            if args.device_command == 'reboot':
+                cmd_device_reboot(controller, args)
+            else:
+                parser.parse_args(['device', '--help'])
         elif args.command == 'group':
             if args.group_command == 'set-mask':
                 cmd_group_set_mask(controller, args)
@@ -390,6 +467,8 @@ def main():
         elif args.command == 'dhcp':
             if args.dhcp_command == 'reserve':
                 cmd_dhcp_reserve(controller, args)
+            elif args.dhcp_command == 'list':
+                cmd_dhcp_list(controller, args)
             else:
                 parser.parse_args(['dhcp', '--help'])
         elif args.command == 'vpn':

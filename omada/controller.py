@@ -512,13 +512,90 @@ class OmadaController:
             return None
         return self._request(f"sites/{site_key}/clients/{mac}", method="PATCH", data=body)
 
-    def get_mdns(self, site_key=None) -> Optional[Dict]:
-        """Get the mDNS reflector state (global toggle)."""
+    def get_mdns(self, site_key=None) -> List[Dict]:
+        """Get the mDNS reflector rules for a site.
+
+        On this controller build (v6.2) mDNS is rule-based, served from
+        ``setting/service/mdns`` (a paginated list), not the legacy
+        ``setting/mdns`` global toggle. Each rule carries name/status/deviceType
+        plus the Bonjour service profile and the service/client networks.
+        """
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+        params = {"currentPage": 1, "currentPageSize": 100}
+        result = self._request(f"sites/{site_key}/setting/service/mdns", params=params)
+        return result['result']['data'] if result and 'result' in result else []
+
+    def create_mdns_rule(self, rule_obj, site_key=None) -> Optional[Dict]:
+        """Create an mDNS reflector rule (POST setting/service/mdns)."""
         site_key = site_key or self.current_site_key
         if not site_key:
             return None
-        result = self._request(f"sites/{site_key}/setting/mdns")
+        return self._request(f"sites/{site_key}/setting/service/mdns",
+                             method="POST", data=rule_obj)
+
+    def delete_mdns_rule(self, rule_id, site_key=None) -> Optional[Dict]:
+        """Delete an mDNS reflector rule (DELETE setting/service/mdns/{id})."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        return self._request(f"sites/{site_key}/setting/service/mdns/{rule_id}",
+                             method="DELETE")
+
+    def get_dhcp_reservations(self, site_key=None) -> List[Dict]:
+        """List fixed-IP (DHCP) reservations for a site."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return []
+        params = {"currentPage": 1, "currentPageSize": 100, "searchKey": ""}
+        result = self._request(f"sites/{site_key}/setting/service/dhcp", params=params)
+        return result['result']['data'] if result and 'result' in result else []
+
+    def get_wan_status(self, site_key=None) -> Optional[Dict]:
+        """Get WAN/LAN status (internet links, IPs, gateway presence)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        result = self._request(f"sites/{site_key}/setting/wanlanstatus")
         return result['result'] if result and 'result' in result else None
+
+    def get_capabilities(self, site_key=None) -> Optional[Dict]:
+        """Get the controller feature/capacity map for a site."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        result = self._request(f"sites/{site_key}/setting/capacity")
+        return result['result'] if result and 'result' in result else None
+
+    def get_gateway(self, mac, site_key=None) -> Optional[Dict]:
+        """Get full gateway detail (includes portConfigs with PVID/link)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        result = self._request(f"sites/{site_key}/gateways/{mac}")
+        return result['result'] if result and 'result' in result else None
+
+    def block_client(self, mac, site_key=None) -> Optional[Dict]:
+        """Block a client from the network (POST cmd/clients/{mac}/block)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        return self._request(f"sites/{site_key}/cmd/clients/{mac}/block", method="POST")
+
+    def unblock_client(self, mac, site_key=None) -> Optional[Dict]:
+        """Unblock a previously blocked client (POST cmd/clients/{mac}/unblock)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        return self._request(f"sites/{site_key}/cmd/clients/{mac}/unblock", method="POST")
+
+    def reboot_device(self, mac, site_key=None) -> Optional[Dict]:
+        """Reboot a managed device (POST cmd/devices/{mac}/reboot)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        return self._request(f"sites/{site_key}/cmd/devices/{mac}/reboot", method="POST")
 
     # Utility methods for easy access to common info
     def get_network_summary(self, site_key=None) -> Dict:

@@ -327,14 +327,24 @@ def cmd_acl_edit(controller, args):
 
 
 def cmd_mdns(controller, args):
-    """Show the mDNS reflector state (read-only).
+    """List the mDNS reflector rules (read-only).
 
-    Write/enable is not implemented: on this v6.2 build the enable payload is
-    undocumented (`setting/mdns` PUT `{enable:true}` -> "Invalid request parameters").
+    On this v6.2 build mDNS is rule-based (`setting/service/mdns`), each rule
+    bridging a Bonjour service between a service network and client network(s).
     """
     logger = logging.getLogger('omada_api')
-    cfg = controller.get_mdns(args.site)
-    logger.info(f"mDNS: {cfg}")
+    rules = controller.get_mdns(args.site)
+    if not rules:
+        logger.info("No mDNS reflector rules configured.")
+        return
+    for r in rules:
+        status = 'enabled' if r.get('status') else 'disabled'
+        logger.info(
+            f"{r.get('name', '?')} [{status}] "
+            f"device={r.get('deviceType', '?')} "
+            f"service={r.get('serviceNetworks', r.get('osg', {}).get('serviceNetworks'))} "
+            f"clients={r.get('clientNetworks', r.get('osg', {}).get('clientNetworks'))}"
+        )
 
 
 _MAC_RE = re.compile(r'^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$')
@@ -396,6 +406,231 @@ def cmd_dhcp_reserve(controller, args):
         logger.info(f"✅ Reserved {ip} for '{client.get('name')}' ({mac})")
     else:
         logger.error(f"❌ Failed to reserve IP for '{client.get('name')}'")
+
+
+def _resolve_client(controller, ident, site):
+    """Resolve a client by MAC or name (searches inactive too)."""
+    if _MAC_RE.match(ident):
+        client = controller.get_client(_norm_mac(ident), site)
+        if client:
+            return client
+    return controller.find_client_by_name(ident, site, active_only=False)
+
+
+def cmd_dhcp_list(controller, args):
+    """List fixed-IP (DHCP) reservations."""
+    logger = logging.getLogger('omada_api')
+    rows = controller.get_dhcp_reservations(args.site)
+    if not rows:
+        logger.info("No DHCP reservations configured.")
+        return
+    logger.info(f"DHCP reservations ({len(rows)}):")
+    for r in rows:
+        name = r.get('clientName') or r.get('name') or '?'
+        status = 'enabled' if r.get('status') else 'disabled'
+        logger.info(f"  {r.get('ip', '?'):<15} {r.get('mac', '?'):<19} "
+                    f"[{status}] net={r.get('netName', '?')} name={name}")
+
+
+_PORT_SPEED = {0: 'link-down', 1: '10M', 2: '100M', 3: '1000M', 4: '2.5G', 5: '10G'}
+
+
+def _find_gateway(controller, site, mac=None):
+    """Return the gateway device dict (by MAC or the site's first gateway)."""
+    devices = controller.get_devices_list(site)
+    if mac:
+        want = _norm_mac(mac)
+        return next((d for d in devices if _norm_mac(d.get('mac', '')) == want), None)
+    return next((d for d in devices if str(d.get('type')) == 'gateway'), None)
+
+
+def cmd_status(controller, args):
+    """Show gateway + WAN/internet status."""
+    logger = logging.getLogger('omada_api')
+    dev = _find_gateway(controller, args.site)
+    if not dev:
+        logger.info("No gateway on this site.")
+        return
+    gw = controller.get_gateway(dev['mac'], args.site) or {}
+    logger.info(f"Gateway: {gw.get('name', dev.get('name'))} "
+                f"({gw.get('model', '?')}) uptime={gw.get('uptime', '?')}")
+    wan_ports = [p.get('portStat', {}) for p in gw.get('portConfigs', [])
+                 if p.get('portStat', {}).get('type') == 0]
+    for ps in wan_ports:
+        inet = 'internet UP' if ps.get('internetState') == 1 else 'internet DOWN'
+        logger.info(f"  WAN (port {ps.get('port')}): "
+                    f"{'link-up' if ps.get('status') == 1 else 'link-down'}, {inet}, "
+                    f"ip={ps.get('ip', '?')} speed={_PORT_SPEED.get(ps.get('speed'), '?')}")
+
+
+def cmd_capabilities(controller, args):
+    """Show the controller feature/capacity map."""
+    logger = logging.getLogger('omada_api')
+    caps = controller.get_capabilities(args.site)
+    if not caps:
+        logger.info("No capability data available.")
+        return
+    if getattr(args, 'raw', False):
+        logger.info(json.dumps(caps, indent=2, ensure_ascii=False))
+        return
+    # Print booleans compactly; show only enabled features unless --all
+    show_all = getattr(args, 'all', False)
+    for k in sorted(caps):
+        v = caps[k]
+        if isinstance(v, bool):
+            if show_all or v:
+                logger.info(f"  {k}: {v}")
+        else:
+            logger.info(f"  {k}: {v}")
+
+
+_PORT_TYPE = {0: 'WAN', 1: 'WAN/LAN', 2: 'LAN'}
+
+
+def cmd_ports(controller, args):
+    """Show gateway ports with PVID (VLAN) and link state."""
+    logger = logging.getLogger('omada_api')
+    dev = _find_gateway(controller, args.site, args.mac)
+    if not dev:
+        logger.error("No gateway found; pass --mac")
+        return
+    gw = controller.get_gateway(dev['mac'], args.site)
+    if not gw:
+        logger.error(f"Gateway {dev['mac']} not found")
+        return
+    logger.info(f"Gateway {gw.get('name', dev['mac'])} ({dev['mac']}) ports:")
+    for p in gw.get('portConfigs', []):
+        ps = p.get('portStat', {})
+        link = 'up' if ps.get('status') == 1 else 'down'
+        pvid_names = p.get('availablePvidNames') or []
+        avail = ','.join(str(v.get('pvName')) for v in pvid_names)
+        pvname = next((v.get('pvName') for v in pvid_names
+                       if v.get('pvId') == p.get('pvid')), p.get('pvid'))
+        logger.info(f"  Port {p.get('port')} [{_PORT_TYPE.get(ps.get('type'), '?')}]: "
+                    f"link={link} ({_PORT_SPEED.get(ps.get('speed'), '?')}) "
+                    f"pvid={p.get('pvid')}({pvname}) available=[{avail}]")
+
+
+def cmd_client(controller, args):
+    """Show details for a single client (by name or MAC)."""
+    logger = logging.getLogger('omada_api')
+    client = _resolve_client(controller, args.client, args.site)
+    if not client:
+        logger.error(f"Client '{args.client}' not found")
+        return
+    fields = ['name', 'mac', 'ip', 'vid', 'networkName', 'connectDevType',
+              'wireless', 'ssid', 'signalLevel', 'active', 'blocked',
+              'uptime', 'connectType']
+    logger.info(f"Client: {client.get('name') or client.get('mac')}")
+    for f in fields:
+        if f in client:
+            logger.info(f"  {f}: {client[f]}")
+    ipset = client.get('ipSetting')
+    if ipset:
+        logger.info(f"  fixedIp: {ipset.get('useFixedAddr')} "
+                    f"ip={ipset.get('ip')} netId={ipset.get('netId')}")
+
+
+def cmd_client_block(controller, args):
+    """Block a client from the network."""
+    logger = logging.getLogger('omada_api')
+    client = _resolve_client(controller, args.client, args.site)
+    if not client:
+        logger.error(f"Client '{args.client}' not found")
+        return
+    mac = client['mac']
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "POST", f"cmd/clients/{mac}/block", {})
+        return
+    if controller.block_client(mac, args.site) is not None:
+        logger.info(f"✅ Blocked '{client.get('name')}' ({mac})")
+    else:
+        logger.error(f"❌ Failed to block '{client.get('name')}'")
+
+
+def cmd_client_unblock(controller, args):
+    """Unblock a client."""
+    logger = logging.getLogger('omada_api')
+    client = _resolve_client(controller, args.client, args.site)
+    if not client:
+        logger.error(f"Client '{args.client}' not found")
+        return
+    mac = client['mac']
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "POST", f"cmd/clients/{mac}/unblock", {})
+        return
+    if controller.unblock_client(mac, args.site) is not None:
+        logger.info(f"✅ Unblocked '{client.get('name')}' ({mac})")
+    else:
+        logger.error(f"❌ Failed to unblock '{client.get('name')}'")
+
+
+def cmd_device_reboot(controller, args):
+    """Reboot a managed device (by name or MAC)."""
+    logger = logging.getLogger('omada_api')
+    device = None
+    if _MAC_RE.match(args.device):
+        mac = _norm_mac(args.device)
+        device = next((d for d in controller.get_devices_list(args.site)
+                       if _norm_mac(d.get('mac', '')) == mac), None)
+        if not device:
+            device = {'mac': mac, 'name': args.device}
+    else:
+        device = controller.find_device_by_name(args.device, args.site)
+    if not device:
+        logger.error(f"Device '{args.device}' not found")
+        return
+    mac = device['mac']
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "POST", f"cmd/devices/{mac}/reboot", {})
+        return
+    if controller.reboot_device(mac, args.site) is not None:
+        logger.info(f"✅ Reboot issued for '{device.get('name')}' ({mac})")
+    else:
+        logger.error(f"❌ Failed to reboot '{device.get('name')}'")
+
+
+def cmd_mdns_create(controller, args):
+    """Create an mDNS reflector rule."""
+    logger = logging.getLogger('omada_api')
+    device_type = 1 if args.device_type == 'gateway' else 0
+    rule = {
+        "name": args.name,
+        "status": not args.disabled,
+        "type": device_type,
+        "osg": {
+            "profileIds": args.profile_ids,
+            "serviceNetworks": args.service_networks,
+            "clientNetworks": args.client_networks,
+        },
+    }
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "POST", "setting/service/mdns", rule)
+        return
+    if controller.create_mdns_rule(rule, args.site) is not None:
+        logger.info(f"✅ Created mDNS rule '{args.name}'")
+    else:
+        logger.error(f"❌ Failed to create mDNS rule '{args.name}'")
+
+
+def cmd_mdns_delete(controller, args):
+    """Delete an mDNS reflector rule (by name or id)."""
+    logger = logging.getLogger('omada_api')
+    rule_id = args.id
+    if not rule_id:
+        rule = next((r for r in controller.get_mdns(args.site)
+                     if r.get('name') == args.name), None)
+        if not rule:
+            logger.error(f"mDNS rule '{args.name}' not found")
+            return
+        rule_id = rule.get('id')
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "DELETE", f"setting/service/mdns/{rule_id}", {})
+        return
+    if controller.delete_mdns_rule(rule_id, args.site) is not None:
+        logger.info(f"✅ Deleted mDNS rule {rule_id}")
+    else:
+        logger.error(f"❌ Failed to delete mDNS rule {rule_id}")
 
 
 def cmd_find_device(controller, args):
