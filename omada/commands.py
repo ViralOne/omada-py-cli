@@ -1,5 +1,19 @@
 """CLI command handlers (cmd_* functions). Each takes (controller, args)."""
+import ipaddress
+import json
 import logging
+import re
+
+# Enum maps shared by the write commands
+ACL_TYPE = {'gateway': 0, 'switch': 1, 'eap': 2}
+ENDPOINT_TYPE = {'network': 0, 'ipgroup': 1, 'ipport': 2}
+POLICY = {'permit': 1, 'deny': 0}
+
+
+def _dry_run(logger, method, target, body):
+    """Print what a write would send, without performing it."""
+    logger.info(f"[DRY-RUN] {method} {target}")
+    logger.info(json.dumps(body, indent=2, ensure_ascii=False))
 
 
 def cmd_sites(controller, args):
@@ -215,6 +229,174 @@ def cmd_acl(controller, args):
         logger.info(f"      srcType={acl.get('sourceType')} src={acl.get('sourceIds')}")
         logger.info(f"      dstType={acl.get('destinationType')} dst={acl.get('destinationIds')}")
         logger.info(f"      id: {acl.get('id')}")
+
+def cmd_group_set_mask(controller, args):
+    """Set the subnet mask (prefix length) on an IP group's entries."""
+    logger = logging.getLogger('omada_api')
+    group = controller.get_group_by_name(args.name, args.site)
+    if not group:
+        logger.error(f"Group '{args.name}' not found")
+        return
+    if not group.get('ipList'):
+        logger.error(f"Group '{args.name}' has no ipList entries to modify")
+        return
+
+    updated = dict(group)
+    updated['ipList'] = [{**entry, 'mask': args.mask} for entry in group['ipList']]
+    target = f"setting/profiles/groups/{group['groupId']}"
+
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "PUT", target, updated)
+        return
+
+    result = controller.update_group(group['groupId'], updated, args.site)
+    if result is not None:
+        logger.info(f"✅ Group '{args.name}' mask set to /{args.mask}")
+    else:
+        logger.error(f"❌ Failed to update group '{args.name}'")
+
+
+def cmd_acl_create(controller, args):
+    """Create a gateway/switch/eap ACL rule."""
+    logger = logging.getLogger('omada_api')
+    obj = {
+        "name": args.name,
+        "type": ACL_TYPE[args.type],
+        "status": not args.disabled,
+        "policy": POLICY[args.policy],
+        "protocols": args.protocols,
+        "sourceType": ENDPOINT_TYPE[args.src_type],
+        "sourceIds": args.src,
+        "destinationType": ENDPOINT_TYPE[args.dst_type],
+        "destinationIds": args.dst,
+        "direction": {"lanToWan": False, "lanToLan": True, "wanInIds": [], "vpnInIds": []},
+        "stateMode": 0,
+        "customAclOsws": [],
+        "customAclStacks": [],
+        "customAclDevices": [],
+    }
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "POST", f"setting/firewall/acls?type={obj['type']}", obj)
+        return
+
+    result = controller.create_acl(obj, args.site)
+    if result is not None:
+        logger.info(f"✅ Created ACL rule '{args.name}' ({args.policy})")
+    else:
+        logger.error(f"❌ Failed to create ACL rule '{args.name}'")
+
+
+def cmd_acl_edit(controller, args):
+    """Edit an existing ACL rule (read-modify-write, PUT)."""
+    logger = logging.getLogger('omada_api')
+    rule = None
+    if args.id:
+        rule = controller.get_acl_by_id(args.id, args.type, args.site)
+    elif args.name:
+        rule = controller.get_acl_by_name(args.name, args.type, args.site)
+    if not rule:
+        logger.error("ACL rule not found (locate it with --id or --name)")
+        return
+
+    updated = dict(rule)
+    if args.rename is not None:
+        updated['name'] = args.rename
+    if args.policy is not None:
+        updated['policy'] = POLICY[args.policy]
+    if args.src_type is not None:
+        updated['sourceType'] = ENDPOINT_TYPE[args.src_type]
+    if args.src is not None:
+        updated['sourceIds'] = args.src
+    if args.dst_type is not None:
+        updated['destinationType'] = ENDPOINT_TYPE[args.dst_type]
+    if args.dst is not None:
+        updated['destinationIds'] = args.dst
+    if args.status is not None:
+        updated['status'] = (args.status == 'enable')
+
+    target = f"setting/firewall/acls/{rule['id']}"
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "PUT", target, updated)
+        return
+
+    result = controller.update_acl(rule['id'], updated, args.site)
+    if result is not None:
+        logger.info(f"✅ Updated ACL rule '{rule.get('name')}'")
+    else:
+        logger.error(f"❌ Failed to update ACL rule '{rule.get('name')}'")
+
+
+def cmd_mdns(controller, args):
+    """Show the mDNS reflector state (read-only).
+
+    Write/enable is not implemented: on this v6.2 build the enable payload is
+    undocumented (`setting/mdns` PUT `{enable:true}` -> "Invalid request parameters").
+    """
+    logger = logging.getLogger('omada_api')
+    cfg = controller.get_mdns(args.site)
+    logger.info(f"mDNS: {cfg}")
+
+
+_MAC_RE = re.compile(r'^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$')
+
+
+def _norm_mac(mac: str) -> str:
+    """Normalize a MAC to the dash-separated uppercase form the API uses."""
+    return mac.replace(':', '-').upper()
+
+
+def _match_network_id(controller, ip, site_key):
+    """Find the network id whose subnet contains ip (for DHCP reservations)."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    for net in controller.get_networks(site_key):
+        subnet = net.get('gatewaySubnet')
+        if subnet and addr in ipaddress.ip_network(subnet, strict=False):
+            return net.get('id')
+    return None
+
+
+def cmd_dhcp_reserve(controller, args):
+    """Reserve a fixed IP for a client (by name or MAC)."""
+    logger = logging.getLogger('omada_api')
+
+    client = None
+    if _MAC_RE.match(args.client):
+        client = controller.get_client(_norm_mac(args.client), args.site)
+    if not client:
+        client = controller.find_client_by_name(args.client, args.site, active_only=False)
+    if not client:
+        logger.error(f"Client '{args.client}' not found")
+        return
+
+    mac = client['mac']
+    ip = args.ip or client.get('ip')
+    if not ip:
+        logger.error("Client has no IP; pass --ip")
+        return
+
+    net_id = args.net_id or (client.get('ipSetting') or {}).get('netId') \
+        or _match_network_id(controller, ip, args.site)
+    if not net_id:
+        logger.error(f"Could not determine network for {ip}; pass --net-id")
+        return
+
+    body = {
+        "name": client.get('name') or mac,
+        "ipSetting": {"useFixedAddr": True, "netId": net_id, "ip": ip},
+    }
+    if getattr(args, 'dry_run', False):
+        _dry_run(logger, "PATCH", f"clients/{mac}", body)
+        return
+
+    result = controller.update_client(mac, body, args.site)
+    if result is not None:
+        logger.info(f"✅ Reserved {ip} for '{client.get('name')}' ({mac})")
+    else:
+        logger.error(f"❌ Failed to reserve IP for '{client.get('name')}'")
+
 
 def cmd_find_device(controller, args):
     """Find devices using advanced search"""

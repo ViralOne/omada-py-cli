@@ -11,6 +11,7 @@ from .controller import create_controller
 from .commands import (
     cmd_sites, cmd_summary, cmd_devices, cmd_clients,
     cmd_networks, cmd_ssids, cmd_groups, cmd_acl,
+    cmd_acl_create, cmd_acl_edit, cmd_group_set_mask, cmd_mdns, cmd_dhcp_reserve,
     cmd_vpn_tunnels, cmd_vpn_list, cmd_vpn_enable, cmd_vpn_disable,
     cmd_vpn_status, cmd_vpn_restart, cmd_alerts,
     cmd_find_device, cmd_find_client,
@@ -127,9 +128,57 @@ Examples:
 
     subparsers.add_parser('groups', help='List IP / domain groups')
 
-    acl_parser = subparsers.add_parser('acl', help='List ACL rules')
-    acl_parser.add_argument('--type', choices=['gateway', 'switch', 'eap'], default='gateway',
-                            help='ACL type (default: gateway)')
+    acl_parser = subparsers.add_parser('acl', help='ACL rules (list/create/edit)')
+    acl_sub = acl_parser.add_subparsers(dest='acl_command')
+
+    acl_list = acl_sub.add_parser('list', help='List ACL rules')
+    acl_list.add_argument('--type', choices=['gateway', 'switch', 'eap'], default='gateway',
+                          help='ACL type (default: gateway)')
+
+    acl_create = acl_sub.add_parser('create', help='Create an ACL rule')
+    acl_create.add_argument('name')
+    acl_create.add_argument('--type', choices=['gateway', 'switch', 'eap'], default='gateway')
+    acl_create.add_argument('--policy', choices=['permit', 'deny'], required=True)
+    acl_create.add_argument('--src-type', choices=['network', 'ipgroup', 'ipport'], required=True)
+    acl_create.add_argument('--src', nargs='+', required=True, help='source id(s)')
+    acl_create.add_argument('--dst-type', choices=['network', 'ipgroup', 'ipport'], required=True)
+    acl_create.add_argument('--dst', nargs='+', required=True, help='destination id(s)')
+    acl_create.add_argument('--protocols', nargs='+', type=int, default=[256], help='default: 256 (all)')
+    acl_create.add_argument('--disabled', action='store_true', help='create the rule disabled')
+    acl_create.add_argument('--dry-run', action='store_true', help='print the request body, do not write')
+
+    acl_edit = acl_sub.add_parser('edit', help='Edit an ACL rule')
+    acl_edit.add_argument('--type', choices=['gateway', 'switch', 'eap'], default='gateway')
+    acl_edit.add_argument('--id', help='rule id to edit')
+    acl_edit.add_argument('--name', help='rule name to locate (if --id not given)')
+    acl_edit.add_argument('--rename', help='new name')
+    acl_edit.add_argument('--policy', choices=['permit', 'deny'])
+    acl_edit.add_argument('--src-type', choices=['network', 'ipgroup', 'ipport'])
+    acl_edit.add_argument('--src', nargs='+')
+    acl_edit.add_argument('--dst-type', choices=['network', 'ipgroup', 'ipport'])
+    acl_edit.add_argument('--dst', nargs='+')
+    acl_edit.add_argument('--status', choices=['enable', 'disable'])
+    acl_edit.add_argument('--dry-run', action='store_true', help='print the request body, do not write')
+
+    # mDNS reflector (read-only; enable payload undocumented on v6.2)
+    subparsers.add_parser('mdns', help='Show mDNS reflector state')
+
+    # Group write ops
+    group_parser = subparsers.add_parser('group', help='IP/domain group operations')
+    group_sub = group_parser.add_subparsers(dest='group_command')
+    gsm = group_sub.add_parser('set-mask', help="Set subnet mask on a group's IP entries")
+    gsm.add_argument('name')
+    gsm.add_argument('mask', type=int)
+    gsm.add_argument('--dry-run', action='store_true', help='print the request body, do not write')
+
+    # DHCP operations
+    dhcp_parser = subparsers.add_parser('dhcp', help='DHCP operations')
+    dhcp_sub = dhcp_parser.add_subparsers(dest='dhcp_command')
+    dres = dhcp_sub.add_parser('reserve', help='Reserve a fixed IP for a client')
+    dres.add_argument('client', help='client name or MAC')
+    dres.add_argument('--ip', help='IP to reserve (default: the client current IP)')
+    dres.add_argument('--net-id', help='network id (default: auto-detect from IP)')
+    dres.add_argument('--dry-run', action='store_true', help='print the request body, do not write')
 
     # VPN commands
     vpn_parser = subparsers.add_parser('vpn', help='VPN management')
@@ -323,7 +372,26 @@ def main():
         elif args.command == 'groups':
             cmd_groups(controller, args)
         elif args.command == 'acl':
-            cmd_acl(controller, args)
+            if args.acl_command == 'create':
+                cmd_acl_create(controller, args)
+            elif args.acl_command == 'edit':
+                cmd_acl_edit(controller, args)
+            elif args.acl_command in ('list', None):
+                cmd_acl(controller, args)
+            else:
+                parser.parse_args(['acl', '--help'])
+        elif args.command == 'mdns':
+            cmd_mdns(controller, args)
+        elif args.command == 'group':
+            if args.group_command == 'set-mask':
+                cmd_group_set_mask(controller, args)
+            else:
+                parser.parse_args(['group', '--help'])
+        elif args.command == 'dhcp':
+            if args.dhcp_command == 'reserve':
+                cmd_dhcp_reserve(controller, args)
+            else:
+                parser.parse_args(['dhcp', '--help'])
         elif args.command == 'vpn':
             if args.vpn_command == 'list':
                 cmd_vpn_list(controller, args)

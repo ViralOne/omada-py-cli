@@ -441,6 +441,85 @@ class OmadaController:
         result = self._request(f"sites/{site_key}/setting/profiles/groups")
         return result['result']['data'] if result and 'result' in result else []
 
+    def get_group_by_name(self, name, site_key=None) -> Optional[Dict]:
+        """Find an IP/domain group by name"""
+        for group in self.get_groups(site_key):
+            if group.get('name') == name:
+                return group
+        return None
+
+    def get_acl_by_id(self, acl_id, acl_type="gateway", site_key=None) -> Optional[Dict]:
+        """Find an ACL rule by id"""
+        for acl in self.get_acls(acl_type, site_key):
+            if acl.get('id') == acl_id:
+                return acl
+        return None
+
+    def get_acl_by_name(self, name, acl_type="gateway", site_key=None) -> Optional[Dict]:
+        """Find an ACL rule by name"""
+        for acl in self.get_acls(acl_type, site_key):
+            if acl.get('name') == name:
+                return acl
+        return None
+
+    # --- Write operations (networking config) ---
+    def update_group(self, group_id, group_obj, site_key=None) -> Optional[Dict]:
+        """Update an IP/domain group.
+
+        Verb differs by controller build: v6.2 uses PATCH on `.../groups/{type}/{id}`;
+        older builds use PUT on `.../groups/{id}`. Try PATCH first, fall back to PUT.
+        """
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        gtype = group_obj.get('type', 0)
+        result = self._request(f"sites/{site_key}/setting/profiles/groups/{gtype}/{group_id}",
+                               method="PATCH", data=group_obj)
+        if result is None:
+            result = self._request(f"sites/{site_key}/setting/profiles/groups/{group_id}",
+                                   method="PUT", data=group_obj)
+        return result
+
+    def create_acl(self, acl_obj, site_key=None) -> Optional[Dict]:
+        """Create a firewall ACL rule (POST)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        return self._request(f"sites/{site_key}/setting/firewall/acls",
+                             method="POST", data=acl_obj,
+                             params={"type": acl_obj.get('type', 0)})
+
+    def update_acl(self, acl_id, acl_obj, site_key=None) -> Optional[Dict]:
+        """Update a firewall ACL rule (PUT; PATCH is rejected on v6)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        return self._request(f"sites/{site_key}/setting/firewall/acls/{acl_id}",
+                             method="PUT", data=acl_obj)
+
+    def get_client(self, mac, site_key=None) -> Optional[Dict]:
+        """Get a single client by MAC (dash-separated)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        result = self._request(f"sites/{site_key}/clients/{mac}")
+        return result['result'] if result and 'result' in result else None
+
+    def update_client(self, mac, body, site_key=None) -> Optional[Dict]:
+        """Update a client (PATCH), e.g. to set a fixed-IP reservation."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        return self._request(f"sites/{site_key}/clients/{mac}", method="PATCH", data=body)
+
+    def get_mdns(self, site_key=None) -> Optional[Dict]:
+        """Get the mDNS reflector state (global toggle)."""
+        site_key = site_key or self.current_site_key
+        if not site_key:
+            return None
+        result = self._request(f"sites/{site_key}/setting/mdns")
+        return result['result'] if result and 'result' in result else None
+
     # Utility methods for easy access to common info
     def get_network_summary(self, site_key=None) -> Dict:
         """Get a summary of network status"""
