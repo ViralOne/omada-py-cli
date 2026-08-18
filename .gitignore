@@ -3,3 +3,7 @@ omada_token.json
 logs/
 *.log
 .env
+# local dev
+.venv/
+__pycache__/
+*.egg-info/

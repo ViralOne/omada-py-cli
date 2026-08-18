@@ -4,16 +4,23 @@ A collection of Python tools for managing TP-Link Omada controllers. This projec
 
 ## 📁 Project Structure
 
-### Core Files
+Single entrypoint — run everything via **`python3 -m omada <command>`**.
 
-- **`omada_api_v1.py`** - OpenAPI v1 implementation for VPN client management
-- **`omada_api_v2.py`** - Internal API v2 implementation with comprehensive CLI tool
+- **`omada/`** - Implementation package:
+  - `__main__.py` - entrypoint (`python3 -m omada ...`)
+  - `cli.py` - unified argument parsing, logging setup, `main()` dispatch
+  - `controller.py` - `OmadaController` internal API v2 client (auth, requests, all `get_*`/write methods)
+  - `commands.py` - `cmd_*` command handlers (v2)
+  - `actions.py` - predefined custom actions (health-check, bulk-restart, network-status)
+  - `openapi.py` - `OmadaVPNManager` official OpenAPI v1 client (OAuth2, Client-to-Site VPN)
+  - `openapi_cli.py` - `vpn-client` subcommand (v1)
+- **`probe.py`** - read-only dev tool to explore raw API endpoints (GET only)
 - **`.env.example`** - Template for environment configuration
 - **`requirements.txt`** - Python dependencies
 
 ### API Version Comparison
 
-| Feature | API v1 (`omada_api_v1.py`) | API v2 (`omada_api_v2.py`) |
+| Feature | API v1 (`vpn-client`) | API v2 (main commands) |
 |---------|----------------------------|----------------------------|
 | **Authentication** | OpenAPI with OAuth2 flow | Direct login with CSRF tokens |
 | **Primary Use** | VPN client management | Full controller management |
@@ -26,19 +33,43 @@ A collection of Python tools for managing TP-Link Omada controllers. This projec
 
 ## 🚀 Quick Start
 
-### 1. Install Dependencies
+### 1. Install
+
+**Global command (recommended)** — installs an isolated `omada` command on your PATH:
 
 ```bash
-pip install -r requirements.txt
+pipx install -e .        # editable: code changes take effect immediately
 ```
 
-### 2. Configure Environment
+Then run it from anywhere as `omada <command>`.
+
+**Dev / no-install** — use a virtualenv and run via the module:
 
 ```bash
-cp .env.example .env
+python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+python3 -m omada <command>
 ```
 
-Edit `.env` with your controller details:
+> The examples below use `python3 -m omada`; after a global install, replace that with just `omada`.
+
+### 2. Configure Credentials
+
+Scaffold the config file, then edit it:
+
+```bash
+omada init                    # writes ~/.config/omada/.env from a template
+$EDITOR ~/.config/omada/.env
+```
+
+The CLI looks for `.env` in this order (first match wins), so `omada` works from **any directory** once `~/.config/omada/.env` exists:
+
+```
+$OMADA_ENV  →  ./.env  →  ~/.config/omada/.env  →  <project folder>/.env
+```
+
+(No global install? `cp .env.example .env` in the project folder works too.) Running any command without credentials prints these same instructions.
+
+Config keys:
 
 ```env
 # Required for both API versions
@@ -61,19 +92,19 @@ OMADA_VPN_ACTION=restart
 **For VPN Client Management (API v1):**
 
 ```bash
-python3 omada_api_v1.py --vpn MyVPN --action enable
+python3 -m omada vpn-client --vpn MyVPN --action enable
 ```
 
 **For Full Controller Management (API v2):**
 
 ```bash
-python3 omada_api_v2.py sites
-python3 omada_api_v2.py vpn list
+python3 -m omada sites
+python3 -m omada vpn list
 ```
 
 ## 📖 Detailed Usage
 
-### API v1 - VPN Client Manager (`omada_api_v1.py`)
+### API v1 - VPN Client Manager (`vpn-client` subcommand)
 
 **Purpose**: Manage Client-to-Site VPN connections using the official OpenAPI
 
@@ -88,28 +119,29 @@ python3 omada_api_v2.py vpn list
 
 ```bash
 # Enable a single VPN client
-python3 omada_api_v1.py --vpn "Office VPN" --action enable
+python3 -m omada vpn-client --vpn "Office VPN" --action enable
 
 # Disable multiple VPN clients
-python3 omada_api_v1.py --vpn "VPN1" "VPN2" "VPN3" --action disable
+python3 -m omada vpn-client --vpn "VPN1" "VPN2" "VPN3" --action disable
 
 # Restart a VPN client (disable → wait → enable)
-python3 omada_api_v1.py --vpn "MyVPN" --action restart
+python3 -m omada vpn-client --vpn "MyVPN" --action restart
 
 # Generate authentication token only
-python3 omada_api_v1.py --action token_only
+python3 -m omada vpn-client --action token_only
 
 # Use environment variables
-python3 omada_api_v1.py
+python3 -m omada vpn-client
 ```
 
-### API v2 - Controller CLI Tool (`omada_api_v2.py`)
+### API v2 - Controller CLI Tool (main commands)
 
 **Purpose**: Comprehensive Omada controller management using internal API v2
 
 **Key Features**:
 
 - Full network monitoring
+- Network/VLAN, SSID, IP-group & ACL inspection
 - VPN management
 - Wireguard management
 - Device and client management
@@ -122,45 +154,51 @@ python3 omada_api_v1.py
 
 ```bash
 # Network Overview
-python3 omada_api_v2.py sites                    # List all sites
-python3 omada_api_v2.py summary                  # Network summary
-python3 omada_api_v2.py devices                  # List devices
-python3 omada_api_v2.py clients --limit 20       # List clients
+python3 -m omada sites                    # List all sites
+python3 -m omada summary                  # Network summary
+python3 -m omada devices                  # List devices
+python3 -m omada clients --limit 20       # List clients
+
+# Networking config
+python3 -m omada networks                 # List wired networks (VLANs)
+python3 -m omada ssids                    # List SSIDs
+python3 -m omada groups                   # List IP / domain groups
+python3 -m omada acl --type gateway       # List ACL rules (gateway|switch|eap)
 
 # VPN Management
-python3 omada_api_v2.py vpn list                 # List VPN configs
-python3 omada_api_v2.py vpn tunnels              # Active tunnels
-python3 omada_api_v2.py vpn enable "MyVPN"       # Enable VPN
-python3 omada_api_v2.py vpn disable "MyVPN"      # Disable VPN
-python3 omada_api_v2.py vpn restart "MyVPN"      # Restart VPN
-python3 omada_api_v2.py vpn status "MyVPN"       # Check status
+python3 -m omada vpn list                 # List VPN configs
+python3 -m omada vpn tunnels              # Active tunnels
+python3 -m omada vpn enable "MyVPN"       # Enable VPN
+python3 -m omada vpn disable "MyVPN"      # Disable VPN
+python3 -m omada vpn restart "MyVPN"      # Restart VPN
+python3 -m omada vpn status "MyVPN"       # Check status
 
 # Wireguard Management
-python3 omada_api_v2.py wireguard peers          # List WireGuard peers
-python3 omada_api_v2.py wireguard peer           # WireGuard peer management
-python3 omada_api_v2.py wireguard servers        # List WireGuard servers
-python3 omada_api_v2.py wireguard insights       # Show WireGuard connection insights
-python3 omada_api_v2.py wireguard summary        # Show WireGuard summary
+python3 -m omada wireguard peers          # List WireGuard peers
+python3 -m omada wireguard peer           # WireGuard peer management
+python3 -m omada wireguard servers        # List WireGuard servers
+python3 -m omada wireguard insights       # Show WireGuard connection insights
+python3 -m omada wireguard summary        # Show WireGuard summary
 
 # Monitoring & Troubleshooting
-python3 omada_api_v2.py alerts --limit 10        # Recent alerts
-python3 omada_api_v2.py find device "Router"     # Find device
-python3 omada_api_v2.py find client "Phone"      # Find client
+python3 -m omada alerts --limit 10        # Recent alerts
+python3 -m omada find device "Router"     # Find device
+python3 -m omada find client "Phone"      # Find client
 
 # Predefined "custom" actions
-python3 omada_api_v2.py actions network-status   # Show network report (Devices, VPN Status, Alerts, Network Summary)
-python3 omada_api_v2.py actions vpn-health-check   # Check enabled VPNs for active tunnels, restart if no tunnels found
-python3 omada_api_v2.py actions vpn-bulk-restart   # Restart All VPNs
+python3 -m omada actions network-status   # Show network report (Devices, VPN Status, Alerts, Network Summary)
+python3 -m omada actions vpn-health-check   # Check enabled VPNs for active tunnels, restart if no tunnels found
+python3 -m omada actions vpn-bulk-restart   # Restart All VPNs
 
 # Site-specific operations
-python3 omada_api_v2.py --site "Branch Office" devices
+python3 -m omada --site "Branch Office" devices
 ```
 
 ## 🔧 Configuration Guide
 
 ### Getting API v1 Credentials
 
-For `omada_api_v1.py`, you need OpenAPI credentials:
+For the `vpn-client` command, you need OpenAPI credentials:
 
 1. **Controller Web Interface** → Settings → Platform Integration → OpenAPI
 2. **Add New Application** → Type: "Authorization Code"
@@ -180,6 +218,6 @@ For `omada_api_v1.py`, you need OpenAPI credentials:
 ## 📋 Requirements
 
 - Python 3.11+
-- TP-Link Omada Controller (tested with v5.x)
+- TP-Link Omada Controller (tested with v6.2.x — internal API v2 / apiVer 3)
 - Network access to controller
 - Admin credentials for the controller

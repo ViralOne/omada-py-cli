@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
-"""
-Omada VPN Client Manager
+"""Omada OpenAPI v1 client — Client-to-Site VPN client management (OAuth2).
 
-A Python script for managing TP-Link Omada VPN clients via the OpenAPI.
-Supports enable, disable, and restart operations with improved error handling,
-logging, and configuration management.
+This is the official, documented OpenAPI (OAuth2 client_id/secret), distinct
+from the internal API v2 client in ``omada.controller``.
 """
-
 import argparse
 import json
 import logging
@@ -20,10 +16,11 @@ from typing import Dict, List, Optional, Union
 
 import requests
 import urllib3
-from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.exceptions import InsecureRequestWarning
 from urllib3.util.retry import Retry
+
+from .envtools import load_env
 
 
 class VPNAction(Enum):
@@ -52,7 +49,7 @@ class OmadaConfig:
     @classmethod
     def from_env_and_args(cls, args: Optional[argparse.Namespace] = None) -> 'OmadaConfig':
         """Create configuration from environment variables and CLI arguments"""
-        load_dotenv()
+        load_env()
         
         # Get required variables from environment
         required_vars = {
@@ -524,115 +521,3 @@ class OmadaVPNManager:
             return {name: False for name in vpn_names}
 
 
-def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(
-        description="Omada VPN Client Manager - Control TP-Link Omada VPN clients",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s --vpn MyVPN --action enable           # Enable a single VPN
-  %(prog)s --vpn MyVPN1 MyVPN2 --action disable # Disable multiple VPNs
-  %(prog)s --vpn MyVPN --action restart         # Restart a VPN
-  %(prog)s --action token_only                  # Generate token only
-  %(prog)s                                      # Use environment variables
-
-Environment Variables:
-  OMADA_URL, OMADA_CLIENT_ID, OMADA_CLIENT_SECRET, OMADA_OMADAC_ID,
-  OMADA_USERNAME, OMADA_PASSWORD, OMADA_VPN_NAME, OMADA_VPN_ACTION
-        """
-    )
-    
-    parser.add_argument(
-        '--vpn', '-v',
-        nargs='+',
-        help='VPN client name(s) to manage. Can specify multiple names.'
-    )
-    
-    parser.add_argument(
-        '--action', '-a',
-        choices=['enable', 'disable', 'restart', 'token_only'],
-        help='Action to perform on the VPN client(s)'
-    )
-    
-    parser.add_argument(
-        '--version',
-        action='version',
-        version='Omada VPN Manager 1.0.0'
-    )
-    
-    args = parser.parse_args()
-    
-    # Validate that --action is required when --vpn is used
-    if args.vpn and not args.action:
-        parser.error("--action/-a is required when --vpn/-v is specified")
-    
-    return args
-
-
-def main() -> int:
-    """Main function"""
-    try:
-        # Parse command line arguments
-        args = parse_arguments()
-        
-        # Load configuration from environment and CLI args
-        config = OmadaConfig.from_env_and_args(args)
-        
-        # Create manager instance
-        manager = OmadaVPNManager(config)
-        
-        # Log configuration (without sensitive data)
-        manager.logger.info(f"Connecting to Omada Controller at {config.base_url}")
-        if len(config.vpn_names) == 1:
-            manager.logger.info(f"Target VPN: {config.vpn_names[0]} (Action: {config.vpn_action.value})")
-        else:
-            manager.logger.info(f"Target VPNs: {', '.join(config.vpn_names)} (Action: {config.vpn_action.value})")
-        
-        # Authenticate
-        manager.authenticate()
-        
-        # Handle token-only mode
-        if config.vpn_action == VPNAction.TOKEN_ONLY:
-            manager.logger.info("✅ Token generated successfully and saved to omada_token.json")
-            manager.logger.info("Exiting as requested (token_only mode)")
-            return 0
-        
-        # Execute VPN actions
-        if len(config.vpn_names) == 1:
-            # Single VPN - use original method for backward compatibility
-            success = manager.execute_vpn_action(config.vpn_names[0], config.vpn_action)
-            
-            if success:
-                manager.logger.info(f"✅ Successfully {config.vpn_action.value}d VPN client '{config.vpn_names[0]}'")
-                return 0
-            else:
-                manager.logger.error(f"❌ Failed to {config.vpn_action.value} VPN client '{config.vpn_names[0]}'")
-                return 1
-        else:
-            # Multiple VPNs
-            manager.logger.info(f"\n🚀 Starting batch operation for {len(config.vpn_names)} VPN clients...")
-            results = manager.execute_vpn_actions_for_multiple(config.vpn_names, config.vpn_action)
-            
-            # Summary
-            successful = [name for name, success in results.items() if success]
-            failed = [name for name, success in results.items() if not success]
-            
-            manager.logger.info(f"\n📊 Batch operation summary:")
-            manager.logger.info(f"✅ Successful: {len(successful)}/{len(config.vpn_names)}")
-            if successful:
-                manager.logger.info(f"   - {', '.join(successful)}")
-            
-            if failed:
-                manager.logger.info(f"❌ Failed: {len(failed)}/{len(config.vpn_names)}")
-                manager.logger.info(f"   - {', '.join(failed)}")
-            
-            return 0 if len(failed) == 0 else 1
-            
-    except Exception as e:
-        logging.error(f"Application error: {str(e)}")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omada-cli"
+version = "0.1.0"
+description = "CLI for TP-Link Omada controllers (internal API v2 + official OpenAPI v1)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "requests>=2.25.0",
+    "python-dotenv>=0.19.0",
+    "urllib3>=1.26.0",
+]
+
+[project.scripts]
+omada = "omada.cli:main"
+
+[tool.setuptools]
+packages = ["omada"]
